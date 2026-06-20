@@ -11,20 +11,28 @@ type Item = {
 	remarks?: string;
 };
 
+const HOT = ["热门电影", "最新剧集", "动漫", "综艺", "纪录片"];
+
 export default function Home() {
 	const [kw, setKw] = useState("");
 	const [list, setList] = useState<Item[]>([]);
 	const [loading, setLoading] = useState(false);
+	const [searched, setSearched] = useState(false);
 	const [playUrl, setPlayUrl] = useState<string | null>(null);
 	const [playSource, setPlaySource] = useState<string | undefined>();
 
-	async function search() {
-		if (!kw.trim()) return;
+	async function search(term?: string) {
+		const q = (term ?? kw).trim();
+		if (!q) return;
+		if (term) setKw(term);
 		setLoading(true);
+		setSearched(true);
 		try {
-			const r = await fetch("/api/search?wd=" + encodeURIComponent(kw));
+			const r = await fetch("/api/search?wd=" + encodeURIComponent(q));
 			const data = (await r.json()) as { list?: Item[] };
 			setList(data.list ?? []);
+		} catch {
+			setList([]);
 		} finally {
 			setLoading(false);
 		}
@@ -40,43 +48,116 @@ export default function Home() {
 	}
 
 	return (
-		<main className="container">
-			<h1 className="brand">🌌 AuroraTV</h1>
-			<div className="search-bar">
-				<input
-					className="search-input"
-					value={kw}
-					onChange={(e) => setKw(e.target.value)}
-					onKeyDown={(e) => e.key === "Enter" && search()}
-					placeholder="搜索影视…"
-				/>
-				<button onClick={search} disabled={loading}>
-					{loading ? "搜索中…" : "搜索"}
-				</button>
-			</div>
+		<>
+			<header className="site-header">
+				{/* eslint-disable-next-line @next/next/no-img-element */}
+				<img className="logo-badge" src="/logo.png" alt="AuroraTV" />
+				<span className="wordmark">AuroraTV</span>
+				<div className="header-spacer" />
+				<span className="header-link">极光影视聚合</span>
+			</header>
 
-			{playUrl && (
-				<div className="player-wrap">
-					<Player url={playUrl} sourceId={playSource} onAllFailed={() => setPlayUrl(null)} />
-				</div>
-			)}
-
-			<div className="grid">
-				{list.map((it) => (
-					<div
-						key={it.source_id + ":" + it.vod_id}
-						className="card"
-						onClick={() => play(it)}
-					>
-						{/* eslint-disable-next-line @next/next/no-img-element */}
-						{it.poster && <img className="poster" src={it.poster} alt={it.title} />}
-						<div className="card-title">{it.title}</div>
-						<div className="card-meta">
-							{it.year ?? ""} {it.remarks ?? ""}
-						</div>
+			<main className="container">
+				<section className="hero">
+					<h1>
+						探索星辰下的<span className="grad">每一帧光影</span>
+					</h1>
+					<p>聚合多源搜索 · 智能择优播放 · 极速流畅体验</p>
+					<div className="search-bar">
+						<input
+							className="search-input"
+							value={kw}
+							onChange={(e) => setKw(e.target.value)}
+							onKeyDown={(e) => e.key === "Enter" && search()}
+							placeholder="搜索电影、剧集、动漫…"
+						/>
+						<button className="search-btn" onClick={() => search()} disabled={loading}>
+							{loading ? "搜索中…" : "搜索"}
+						</button>
 					</div>
-				))}
-			</div>
-		</main>
+					<div className="chips">
+						{HOT.map((h) => (
+							<button key={h} className="chip" onClick={() => search(h)}>
+								{h}
+							</button>
+						))}
+					</div>
+				</section>
+
+				{playUrl && (
+					<div className="player-wrap">
+						<Player url={playUrl} sourceId={playSource} onAllFailed={() => setPlayUrl(null)} />
+					</div>
+				)}
+
+				{loading && (
+					<div className="grid">
+						{Array.from({ length: 12 }).map((_, i) => (
+							<div className="skeleton" key={i}>
+								<div className="sk-poster" />
+								<div className="sk-line" />
+								<div className="sk-line short" />
+							</div>
+						))}
+					</div>
+				)}
+
+				{!loading && list.length > 0 && (
+					<>
+						<div className="section-head">
+							<h2>搜索结果</h2>
+							<span>共 {list.length} 条</span>
+						</div>
+						<div className="grid">
+							{list.map((it) => (
+								<div
+									key={it.source_id + ":" + it.vod_id}
+									className="card"
+									onClick={() => play(it)}
+								>
+									<div className="poster-box">
+										{/* eslint-disable-next-line @next/next/no-img-element */}
+										{it.poster ? (
+											<img className="poster" src={it.poster} alt={it.title} />
+										) : (
+											<div className="poster-fallback">{it.title.slice(0, 1)}</div>
+										)}
+										<div className="play-overlay">▶</div>
+									</div>
+									<div className="card-body">
+										<div className="card-title">{it.title}</div>
+										<div className="card-meta">
+											{it.year ?? ""} {it.remarks ?? ""}
+										</div>
+									</div>
+								</div>
+							))}
+						</div>
+					</>
+				)}
+
+				{!loading && searched && list.length === 0 && (
+					<div className="empty">
+						<div className="emoji">🔍</div>
+						<h3>没有找到相关内容</h3>
+						<p>换个关键词试试。如果一直没有结果，可能是后台还没有配置可用片源（src/lib/sources.ts）。</p>
+					</div>
+				)}
+
+				{!loading && !searched && (
+					<div className="empty">
+						<div className="emoji">🌌</div>
+						<h3>开始你的观影之旅</h3>
+						<p>在上方输入片名搜索，或点击热门标签快速发现内容。AuroraTV 会从多个片源中为你择优播放。</p>
+					</div>
+				)}
+
+				<footer className="site-footer">
+					AuroraTV · 基于 OpenNext 部署于 Cloudflare Workers
+					<br />
+					本站仅作技术学习与个人使用，所有内容版权归原作者所有
+				</footer>
+			</main>
+		</>
 	);
 }
