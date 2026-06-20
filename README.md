@@ -1,4 +1,4 @@
-# AuroraTV 🌌
+# AuroraTV 
 
 基于 **MoonTVPlus（MIT）** 魔改的影视聚合与播放系统，面向 **Cloudflare 免费额度** 设计：OpenNext on Workers + D1 + KV/Cache API。
 
