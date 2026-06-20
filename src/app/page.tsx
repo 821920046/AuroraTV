@@ -23,7 +23,7 @@ export default function Home() {
 		setLoading(true);
 		try {
 			const r = await fetch("/api/search?wd=" + encodeURIComponent(kw));
-			const data = await r.json();
+			const data = (await r.json()) as { list?: Item[] };
 			setList(data.list ?? []);
 		} finally {
 			setLoading(false);
@@ -32,7 +32,7 @@ export default function Home() {
 
 	async function play(it: Item) {
 		const r = await fetch("/api/play?source=" + it.source_id + "&id=" + it.vod_id);
-		const data = await r.json();
+		const data = (await r.json()) as { url?: string };
 		if (data.url) {
 			setPlayUrl(data.url);
 			setPlaySource(it.source_id);
