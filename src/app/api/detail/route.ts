@@ -2,6 +2,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fetchDetail } from "@/lib/aggregator";
 import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
+import { getEnabledSources } from "@/lib/sources";
+
+export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
 	const sourceId = req.nextUrl.searchParams.get("source");
@@ -15,7 +18,8 @@ export async function GET(req: NextRequest) {
 	const cached = await cacheGetWithKv(key, env);
 	if (cached) return NextResponse.json({ code: 200, cached: true, detail: cached });
 
-	const detail = await fetchDetail(sourceId, vodId);
+	const sources = await getEnabledSources(env.AURORA_DB);
+	const detail = await fetchDetail(sources, sourceId, vodId);
 	if (!detail) return NextResponse.json({ code: 404, msg: "not found" }, { status: 404 });
 
 	// 详情是高价值、低频变更 → persist=true 写入 KV 兜底，TTL 24h

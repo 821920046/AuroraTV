@@ -5,6 +5,8 @@ import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
 import { getSourceHealthMap } from "@/lib/db";
 import { getEnabledSources } from "@/lib/sources";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
   const kw = req.nextUrl.searchParams.get("wd")?.trim();
   if (!kw) return NextResponse.json({ code: 400, msg: "missing wd" }, { status: 400 });

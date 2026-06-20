@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { enabledSources } from "@/lib/sources";
+import { getEnabledSources } from "@/lib/sources";
 import { upsertSourceHealth } from "@/lib/db";
 import { computeScore } from "@/lib/scoring";
 
@@ -14,8 +14,9 @@ export async function GET(req: NextRequest) {
 
 	const now = Date.now();
 	const db = env.AURORA_DB;
+	const sources = await getEnabledSources(db);
 	const results = await Promise.allSettled(
-		enabledSources().map(async (s) => {
+		sources.map(async (s) => {
 			const probes = 3;
 			let ok = 0;
 			let totalMs = 0;

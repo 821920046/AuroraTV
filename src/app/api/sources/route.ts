@@ -1,19 +1,22 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getSourceHealthMap } from "@/lib/db";
-import { enabledSources } from "@/lib/sources";
+import { getEnabledSources } from "@/lib/sources";
+
+export const dynamic = "force-dynamic";
 
 export async function GET() {
 	const { env } = getCloudflareContext();
 	const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : {};
-	const sources = enabledSources().map((s) => ({
+	const sources = await getEnabledSources(env.AURORA_DB);
+	const out = sources.map((s) => ({
 		id: s.id,
 		name: s.name,
 		score: health[s.id]?.score ?? s.weight ?? 0,
 		success_rate: health[s.id]?.success_rate ?? null,
 		avg_latency_ms: health[s.id]?.avg_latency_ms ?? null,
 	}));
-	return NextResponse.json({ code: 200, sources });
+	return NextResponse.json({ code: 200, sources: out });
 }
 
 // 客户端播放失败上报（用于动态降权，简单计数实现）

@@ -1,4 +1,4 @@
-import { enabledSources, type VideoSource } from "./sources";
+import type { VideoSource } from "./sources";
 import type { SourceHealth } from "./db";
 
 const MAX_FANOUT = 6; // ≤ 子请求上限（免费 50），留余量
@@ -26,8 +26,8 @@ async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
 }
 
 // 按健康评分（或静态权重）排序，取前 MAX_FANOUT 个源
-function pickSources(health?: Record<string, SourceHealth>): VideoSource[] {
-	const list = [...enabledSources()];
+function pickSources(sources: VideoSource[], health?: Record<string, SourceHealth>): VideoSource[] {
+	const list = sources.filter((s) => s.enabled !== false);
 	list.sort((a, b) => {
 		const sa = health?.[a.id]?.score ?? a.weight ?? 0;
 		const sb = health?.[b.id]?.score ?? b.weight ?? 0;
@@ -38,10 +38,11 @@ function pickSources(health?: Record<string, SourceHealth>): VideoSource[] {
 
 export async function aggregateSearch(
 	keyword: string,
+	sources: VideoSource[],
 	health?: Record<string, SourceHealth>,
 ): Promise<SearchItem[]> {
-	const sources = pickSources(health);
-	const tasks = sources.map(async (s) => {
+	const picked = pickSources(sources, health);
+	const tasks = picked.map(async (s) => {
 		const url = `${s.api}?ac=detail&wd=${encodeURIComponent(keyword)}`;
 		const res = await fetchWithTimeout(url, TIMEOUT_MS);
 		if (!res.ok) throw new Error(`source ${s.id} ${res.status}`);
@@ -65,10 +66,11 @@ export async function aggregateSearch(
 }
 
 export async function fetchDetail(
+	sources: VideoSource[],
 	sourceId: string,
 	vodId: string,
 ): Promise<Record<string, unknown> | null> {
-	const s = enabledSources().find((x) => x.id === sourceId);
+	const s = sources.find((x) => x.id === sourceId && x.enabled !== false);
 	if (!s) throw new Error("unknown source");
 	const url = `${s.api}?ac=detail&ids=${encodeURIComponent(vodId)}`;
 	const res = await fetchWithTimeout(url, TIMEOUT_MS);
