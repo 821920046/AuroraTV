@@ -1,0 +1,5 @@
+# 复制为 .dev.vars 用于本地开发（不要提交到 git）
+# 线上请用 GitHub Secrets / wrangler secret put 配置
+USERNAME=admin
+PASSWORD=change_me
+CRON_SECRET=replace_with_a_long_random_string

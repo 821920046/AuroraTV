@@ -1,0 +1,11 @@
+name = "auroratv-scheduler"
+main = "index.ts"
+compatibility_date = "2024-09-23"
+
+[triggers]
+crons = ["0 * * * *"]  # 每小时一次源健康检测
+
+[vars]
+# 不带 scheme，代码里会拼上 https://
+TARGET_URL = "REPLACE_WITH_YOUR_WORKER_HOST/api/cron/health"
+# CRON_SECRET 请用 `wrangler secret put CRON_SECRET` 设置，与主站一致

@@ -1,0 +1,32 @@
+{
+  "name": "auroratv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AuroraTV - 影视聚合播放（基于 MoonTVPlus 魔改），部署于 Cloudflare Workers",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "cf:build": "opennextjs-cloudflare build",
+    "cf:preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "cf:deploy": "opennextjs-cloudflare build && wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply auroratv-db",
+    "db:migrate:remote": "wrangler d1 migrations apply auroratv-db --remote"
+  },
+  "dependencies": {
+    "hls.js": "^1.5.17",
+    "next": "14.2.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241011.0",
+    "@opennextjs/cloudflare": "^0.5.0",
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.80.0"
+  }
+}

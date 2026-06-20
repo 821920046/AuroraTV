@@ -1,0 +1,31 @@
+name = "auroratv"
+main = ".open-next/worker.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# OpenNext 生成的静态资源
+assets = { directory = ".open-next/assets", binding = "ASSETS" }
+
+# KV：热数据兜底缓存（免费仅 1000 写/天，谨慎写入）
+[[kv_namespaces]]
+binding = "AURORA_KV"
+id = "<your-kv-namespace-id>"
+
+# D1：影视索引 / 源评分
+[[d1_databases]]
+binding = "AURORA_DB"
+database_name = "auroratv-db"
+database_id = "<your-d1-database-id>"
+
+# R2（可选）：海报 / 增量缓存
+# [[r2_buckets]]
+# binding = "AURORA_R2"
+# bucket_name = "auroratv-assets"
+
+[vars]
+NEXT_PUBLIC_SITE_NAME = "AuroraTV"
+
+# 注意：Cloudflare 的 Cron 触发的是 worker 的 scheduled 处理器。
+# OpenNext 生成的入口默认只处理 fetch，所以源健康检测放在
+# 独立的 workers/scheduler 里（见该目录），它会定时回调本站
+# /api/cron/health 接口。也可改用任意外部定时服务请求该接口。
