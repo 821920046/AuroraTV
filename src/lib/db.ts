@@ -7,10 +7,15 @@ export type SourceHealth = {
 };
 
 export async function getSourceHealthMap(db: D1Database): Promise<Record<string, SourceHealth>> {
-	const { results } = await db.prepare("SELECT * FROM source_health").all<SourceHealth>();
-	const map: Record<string, SourceHealth> = {};
-	for (const r of results ?? []) map[r.source_id] = r;
-	return map;
+	try {
+		const { results } = await db.prepare("SELECT * FROM source_health").all<SourceHealth>();
+		const map: Record<string, SourceHealth> = {};
+		for (const r of results ?? []) map[r.source_id] = r;
+		return map;
+	} catch (e) {
+		console.error("getSourceHealthMap failed:", e);
+		return {};
+	}
 }
 
 export async function upsertSourceHealth(db: D1Database, h: SourceHealth): Promise<void> {
