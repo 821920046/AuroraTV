@@ -79,6 +79,20 @@ export default function Admin() {
 		await load();
 	}
 
+	async function clearAll() {
+		if (sources.length === 0) return;
+		if (!confirm("确定要删除全部 " + sources.length + " 个片源吗？此操作不可恢复。")) return;
+		setBusy(true);
+		try {
+			const r = await fetch("/api/admin/sources?all=1", { method: "DELETE" });
+			const d = (await r.json()) as { deleted?: number; msg?: string };
+			setMsg(r.ok ? "已清空 " + (d.deleted ?? 0) + " 个片源" : "清空失败: " + (d.msg ?? r.status));
+			await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
 	async function doImport() {
 		if (!subUrl.trim() && !subText.trim()) {
 			setMsg("请填写订阅 URL 或粘贴 JSON");
@@ -177,7 +191,14 @@ export default function Admin() {
 				</section>
 
 				<section className="admin-card">
-					<h2>已配置片源（{sources.length}）</h2>
+					<div className="card-head">
+						<h2>已配置片源（{sources.length}）</h2>
+						{sources.length > 0 && (
+							<button className="pill danger" onClick={clearAll} disabled={busy}>
+								清空全部
+							</button>
+						)}
+					</div>
 					{sources.length === 0 ? (
 						<p className="admin-hint">还没有任何片源。用上面的「导入」或「添加」加入你自己获取的合法源。</p>
 					) : (

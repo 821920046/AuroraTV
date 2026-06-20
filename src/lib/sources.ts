@@ -90,6 +90,12 @@ export async function deleteSource(db: D1Database, id: string): Promise<void> {
 	await db.prepare("DELETE FROM source WHERE id = ?1").bind(id).run();
 }
 
+export async function deleteAllSources(db: D1Database): Promise<number> {
+	const res = await db.prepare("DELETE FROM source").run();
+	const meta = (res as unknown as { meta?: { changes?: number } }).meta;
+	return meta?.changes ?? 0;
+}
+
 export async function setSourceEnabled(db: D1Database, id: string, enabled: boolean): Promise<void> {
 	await db.prepare("UPDATE source SET enabled = ?2 WHERE id = ?1").bind(id, enabled ? 1 : 0).run();
 }

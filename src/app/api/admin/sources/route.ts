@@ -4,6 +4,7 @@ import {
 	getAllSources,
 	upsertSource,
 	deleteSource,
+	deleteAllSources,
 	setSourceEnabled,
 	makeSourceId,
 	type VideoSource,
@@ -62,6 +63,11 @@ export async function PATCH(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
 	const { env } = getCloudflareContext();
 	if (!env.AURORA_DB) return noDb();
+	const all = req.nextUrl.searchParams.get("all");
+	if (all === "1" || all === "true") {
+		const deleted = await deleteAllSources(env.AURORA_DB);
+		return NextResponse.json({ code: 200, deleted });
+	}
 	const id = req.nextUrl.searchParams.get("id");
 	if (!id) return NextResponse.json({ code: 400, msg: "缺少 id" }, { status: 400 });
 	await deleteSource(env.AURORA_DB, id);

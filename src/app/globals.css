@@ -544,3 +544,5 @@ button:disabled {
 	color: #fb7185;
 	border-color: rgba(251, 113, 133, 0.5);
 }
+
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
