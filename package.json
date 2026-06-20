@@ -15,13 +15,13 @@
     "db:migrate:remote": "wrangler d1 migrations apply auroratv-db --remote"
   },
   "dependencies": {
-    "hls.js": "^1.5.17",
-    "next": "15.5.0",
+    "hls.js": "^1.6.0",
+    "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241011.0",
+    "@cloudflare/workers-types": "^4.20250620.0",
     "@opennextjs/cloudflare": "^1.19.0",
     "@types/node": "^22.7.5",
     "@types/react": "^19.0.0",
