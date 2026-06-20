@@ -62,7 +62,7 @@ npx wrangler d1 create auroratv-db
 
 ### 3. 初始化数据库
 ```bash
-npm run db:migrate          # 本地
+npm run db:migrate           # 本地
 npm run db:migrate:remote   # 线上
 ```
 
