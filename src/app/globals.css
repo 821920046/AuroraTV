@@ -416,3 +416,131 @@ button:disabled {
 		gap: 12px;
 	}
 }
+
+/* ---------- Admin ---------- */
+.admin-title {
+	font-size: 26px;
+	margin: 28px 0 18px;
+}
+
+.admin-msg {
+	background: rgba(56, 189, 248, 0.12);
+	border: 1px solid rgba(56, 189, 248, 0.4);
+	color: var(--text);
+	padding: 10px 14px;
+	border-radius: 10px;
+	margin-bottom: 18px;
+	font-size: 14px;
+}
+
+.admin-card {
+	background: var(--panel);
+	border: 1px solid var(--panel-border);
+	border-radius: 14px;
+	padding: 20px;
+	margin-bottom: 20px;
+}
+
+.admin-card h2 {
+	font-size: 16px;
+	margin: 0 0 6px;
+}
+
+.admin-hint {
+	color: var(--muted);
+	font-size: 13px;
+	margin: 0 0 14px;
+	line-height: 1.6;
+}
+
+.field {
+	margin-bottom: 14px;
+}
+
+.field label {
+	display: block;
+	font-size: 13px;
+	color: var(--muted);
+	margin-bottom: 6px;
+}
+
+.field-row {
+	display: flex;
+	gap: 14px;
+}
+
+.field-row .field {
+	flex: 1;
+}
+
+.admin-input,
+.admin-textarea {
+	width: 100%;
+	padding: 10px 12px;
+	font-size: 14px;
+	border: 1px solid var(--panel-border);
+	background: rgba(255, 255, 255, 0.05);
+	color: var(--text);
+	border-radius: 10px;
+	outline: none;
+	font-family: inherit;
+	box-sizing: border-box;
+}
+
+.admin-input:focus,
+.admin-textarea:focus {
+	border-color: rgba(56, 189, 248, 0.7);
+}
+
+.admin-textarea {
+	resize: vertical;
+}
+
+.admin-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+
+.admin-table th,
+.admin-table td {
+	text-align: left;
+	padding: 10px 8px;
+	border-bottom: 1px solid var(--panel-border);
+}
+
+.admin-table th {
+	color: var(--muted);
+	font-weight: 600;
+}
+
+.api-cell {
+	color: var(--muted);
+	max-width: 320px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pill {
+	padding: 4px 12px;
+	border-radius: 999px;
+	font-size: 12px;
+	border: 1px solid var(--panel-border);
+	background: transparent;
+	cursor: pointer;
+}
+
+.pill.on {
+	color: #22d3ee;
+	border-color: rgba(34, 211, 238, 0.5);
+}
+
+.pill.off {
+	color: var(--muted);
+}
+
+.pill.danger {
+	color: #fb7185;
+	border-color: rgba(251, 113, 133, 0.5);
+}
