@@ -9,13 +9,13 @@ assets = { directory = ".open-next/assets", binding = "ASSETS" }
 # KV：热数据兜底缓存（免费仅 1000 写/天，谨慎写入）
 [[kv_namespaces]]
 binding = "AURORA_KV"
-id = "<bad65844ff4449a6a90d2f1e4359ae9f>"
+id = "bad65844ff4449a6a90d2f1e4359ae9f"
 
 # D1：影视索引 / 源评分
 [[d1_databases]]
 binding = "AURORA_DB"
 database_name = "auroratv-db"
-database_id = "<53f79419-e52b-4f24-b089-6e312be03949>"
+database_id = "53f79419-e52b-4f24-b089-6e312be03949"
 
 # R2（可选）：海报 / 增量缓存
 # [[r2_buckets]]
