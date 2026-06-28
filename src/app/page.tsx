@@ -54,6 +54,7 @@ export default function Home() {
 				<img className="logo-badge" src="/logo.png" alt="AuroraTV" />
 				<span className="wordmark">AuroraTV</span>
 				<div className="header-spacer" />
+				<a className="header-link" href="/live">直播</a>
 				<a className="header-link" href="/admin">片源管理</a>
 			</header>
 
