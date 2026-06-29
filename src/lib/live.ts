@@ -30,6 +30,17 @@ export const DEFAULT_LIVE_SOURCES: LiveSource[] = [
 	},
 ];
 
+// 地区白名单：只保留这些 group-title 的频道（对应 Free-TV/IPTV 的 china.md / hong_kong.md 的 <h1>）。
+// 置为空数组 [] 表示不过滤、保留全部。匹配对大小写/首尾空格不敏感。
+// 想加台湾/澳门只需追加 "Taiwan" / "Macau"。
+export const REGION_ALLOWLIST: string[] = ["China", "Hong Kong"];
+
+function isAllowedGroup(group?: string | null): boolean {
+	if (REGION_ALLOWLIST.length === 0) return true;
+	const g = (group ?? "").trim().toLowerCase();
+	return REGION_ALLOWLIST.some((a) => a.trim().toLowerCase() === g);
+}
+
 // Free-TV/IPTV 频道名尾部的标记：Ⓢ(非高清) Ⓖ(GeoIP) Ⓨ(YouTube)
 const FLAG_RE = /[\u24c8\u24bc\u24ce]/gu;
 
@@ -175,6 +186,19 @@ export async function getChannel(db: D1Database, id: string): Promise<Channel | 
 	}
 }
 
+// 频道「版本」：取最新 updated_at。摄取/探活后该值会变，用作缓存 key
+// 的一部分，从而让 /live 列表在摄取后立即取到新数据（旧缓存自然过期）。
+export async function getChannelsVersion(db: D1Database): Promise<number> {
+	try {
+		const row = await db
+			.prepare("SELECT MAX(updated_at) AS v, COUNT(*) AS c FROM channel")
+			.first<{ v: number | null; c: number }>();
+		return (row?.v ?? 0) + (row?.c ?? 0);
+	} catch {
+		return 0;
+	}
+}
+
 export async function getChannelCount(db: D1Database): Promise<number> {
 	try {
 		const row = await db
@@ -206,7 +230,8 @@ export async function ingestChannels(
 			console.error("ingest fetch failed:", src.url, e);
 			continue;
 		}
-		const channels = parseM3U(text);
+		// 只保留白名单地区（国内 / 香港），其余直接丢弃，不入库
+		const channels = parseM3U(text).filter((c) => isAllowedGroup(c.group_title));
 		if (channels.length === 0) continue;
 		okSources++;
 		for (let i = 0; i < channels.length; i += 50) {
@@ -300,7 +325,7 @@ export async function probeChannels(
 	return { probed, alive };
 }
 
-// ---------------- 直播订阅源 CRUD ----------------
+// ---------------- ���播订阅源 CRUD ----------------
 
 type LiveSourceRow = { id: string; name: string; url: string; enabled: number };
 
@@ -343,6 +368,21 @@ export async function setLiveSourceEnabled(
 
 export async function deleteLiveSource(db: D1Database, id: string): Promise<void> {
 	await db.prepare("DELETE FROM live_source WHERE id = ?1").bind(id).run();
+}
+
+// 一次性清理：删除不在白名单地区的已入库频道，返回删除数量。
+export async function pruneChannels(db: D1Database): Promise<number> {
+	if (REGION_ALLOWLIST.length === 0) return 0;
+	const lowered = REGION_ALLOWLIST.map((a) => a.trim().toLowerCase());
+	const placeholders = lowered.map((_, i) => "?" + (i + 1)).join(",");
+	const res = await db
+		.prepare(
+			`DELETE FROM channel WHERE group_title IS NULL OR LOWER(TRIM(group_title)) NOT IN (${placeholders})`,
+		)
+		.bind(...lowered)
+		.run();
+	const meta = (res as unknown as { meta?: { changes?: number } }).meta;
+	return meta?.changes ?? 0;
 }
 
 export async function clearChannels(db: D1Database): Promise<number> {

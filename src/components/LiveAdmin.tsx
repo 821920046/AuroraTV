@@ -86,6 +86,28 @@ export default function LiveAdmin() {
 		}
 	}
 
+	async function pruneToCnHk() {
+		if (!confirm("只保留「国内 + 香港」频道，其余全部删除？")) return;
+		setBusy(true);
+		setMsg("正在清理非国内/香港频道…");
+		try {
+			const r = await fetch("/api/admin/live", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ action: "prune" }),
+			});
+			const d = (await r.json()) as { deleted?: number; channelCount?: number; msg?: string };
+			setMsg(
+				r.ok
+					? "已删除 " + (d.deleted ?? 0) + " 个非国内/香港频道，剩余 " + (d.channelCount ?? 0) + " 个"
+					: "清理失败：" + (d.msg ?? r.status),
+			);
+			await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
 	async function clearChannels() {
 		if (!confirm("确定清空全部已摄取频道吗？下次摄取会重建。")) return;
 		setBusy(true);
@@ -107,6 +129,11 @@ export default function LiveAdmin() {
 					<button className="pill on" onClick={ingest} disabled={busy}>
 						{busy ? "处理中…" : "立即刷新频道"}
 					</button>{" "}
+					{channelCount > 0 && (
+						<button className="pill on" onClick={pruneToCnHk} disabled={busy}>
+							只留国内/香港
+						</button>
+					)}{" "}
 					{channelCount > 0 && (
 						<button className="pill danger" onClick={clearChannels} disabled={busy}>
 							清空频道

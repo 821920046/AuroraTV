@@ -9,6 +9,7 @@ import {
 	ingestChannels,
 	getChannelCount,
 	clearChannels,
+	pruneChannels,
 	slugify,
 	type LiveSource,
 } from "@/lib/live";
@@ -41,6 +42,13 @@ export async function POST(req: NextRequest) {
 		const sources = await getEnabledLiveSources(env.AURORA_DB);
 		const result = await ingestChannels(env.AURORA_DB, sources);
 		return NextResponse.json({ code: 200, ...result });
+	}
+
+	// 只保留白名单地区（国内/香港），删除其余已入库频道
+	if (body.action === "prune") {
+		const deleted = await pruneChannels(env.AURORA_DB);
+		const channelCount = await getChannelCount(env.AURORA_DB);
+		return NextResponse.json({ code: 200, deleted, channelCount });
 	}
 
 	if (!body.name || !body.url)
