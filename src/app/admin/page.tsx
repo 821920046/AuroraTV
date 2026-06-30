@@ -1,6 +1,5 @@
 "use client";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import LiveAdmin from "@/components/LiveAdmin";
 
 type SourceItem = {
 	id: string;
@@ -353,8 +352,6 @@ export default function Admin() {
 						</table>
 					)}
 				</section>
-
-				<LiveAdmin />
 
 				<footer className="site-footer">AuroraTV · 片源由站长自行管理，请确保拥有合法授权</footer>
 			</main>
