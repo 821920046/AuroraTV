@@ -10,6 +10,10 @@ type SourceItem = {
 	weight?: number;
 	enabled?: boolean;
 	score?: number | null;
+	success_rate?: number | null;
+	auto_disabled?: number;
+	fail_streak?: number;
+	last_ok_at?: number | null;
 };
 
 export default function Admin() {
@@ -61,6 +65,38 @@ export default function Admin() {
 				setWeight("1");
 				await load();
 			}
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function healthCheck() {
+		setBusy(true);
+		setMsg("正在体检片源（探活并自动停用失效源）…");
+		try {
+			const r = await fetch("/api/admin/sources", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ action: "health_check" }),
+			});
+			const d = (await r.json()) as {
+				checked?: number;
+				disabled?: number;
+				recovered?: number;
+				msg?: string;
+			};
+			setMsg(
+				r.ok
+					? "体检完成：检测 " +
+							(d.checked ?? 0) +
+							" 个，自动停用 " +
+							(d.disabled ?? 0) +
+							" 个，恢复 " +
+							(d.recovered ?? 0) +
+							" 个"
+					: "体检失败: " + (d.msg ?? r.status),
+			);
+			if (r.ok) await load();
 		} finally {
 			setBusy(false);
 		}
@@ -194,12 +230,20 @@ export default function Admin() {
 				<section className="admin-card">
 					<div className="card-head">
 						<h2>已配置片源（{sources.length}）</h2>
-						{sources.length > 0 && (
-							<button className="pill danger" onClick={clearAll} disabled={busy}>
-								清空全部
+						<div className="head-actions">
+							<button className="pill on" onClick={healthCheck} disabled={busy}>
+								{busy ? "处理中…" : "立即体检"}
 							</button>
-						)}
+							{sources.length > 0 && (
+								<button className="pill danger" onClick={clearAll} disabled={busy}>
+									清空全部
+								</button>
+							)}
+						</div>
 					</div>
+					<p className="admin-hint">
+						「立即体检」会探测各源可用性：连续多轮无响应的源会被<b>自动停用</b>（状态显示“自动停用”），之后探测到恢复会自动重新启用；手动停用的源不受影响。定时任务每小时也会分批体检。
+					</p>
 					{sources.length === 0 ? (
 						<p className="admin-hint">还没有任何片源。用上面的「导入」或「添加」加入你自己获取的合法源。</p>
 					) : (
@@ -221,10 +265,14 @@ export default function Admin() {
 										<td>{s.score != null ? s.score.toFixed(2) : "—"}</td>
 										<td>
 											<button
-												className={"pill " + (s.enabled !== false ? "on" : "off")}
+												className={
+													"pill " +
+													(s.enabled !== false ? "on" : s.auto_disabled ? "auto" : "off")
+												}
 												onClick={() => toggle(s)}
+												title={s.fail_streak ? "连续失败 " + s.fail_streak + " 轮" : undefined}
 											>
-												{s.enabled !== false ? "启用" : "停用"}
+												{s.enabled !== false ? "启用" : s.auto_disabled ? "自动停用" : "停用"}
 											</button>
 										</td>
 										<td>

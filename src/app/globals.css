@@ -669,3 +669,15 @@ button:disabled {
 	font-size: 12px;
 	max-width: 520px;
 }
+
+/* 片源管理：体检/自动停用 */
+.head-actions {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+.pill.auto {
+	background: rgba(245, 158, 11, 0.16);
+	color: #f59e0b;
+	border-color: rgba(245, 158, 11, 0.4);
+}

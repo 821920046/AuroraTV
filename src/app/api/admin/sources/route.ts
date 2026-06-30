@@ -9,7 +9,8 @@ import {
 	makeSourceId,
 	type VideoSource,
 } from "@/lib/sources";
-import { getSourceHealthMap } from "@/lib/db";
+import { getSourceHealthMap, clearSourceAutoDisabled } from "@/lib/db";
+import { runHealthCheck } from "@/lib/health";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,10 @@ export async function GET() {
 			...s,
 			score: health[s.id]?.score ?? null,
 			success_rate: health[s.id]?.success_rate ?? null,
+			avg_latency_ms: health[s.id]?.avg_latency_ms ?? null,
+			auto_disabled: health[s.id]?.auto_disabled ?? 0,
+			fail_streak: health[s.id]?.fail_streak ?? 0,
+			last_ok_at: health[s.id]?.last_ok_at ?? null,
 		})),
 	});
 }
@@ -35,7 +40,20 @@ export async function GET() {
 export async function POST(req: NextRequest) {
 	const { env } = getCloudflareContext();
 	if (!env.AURORA_DB) return noDb();
-	const body = (await req.json().catch(() => ({}))) as Partial<VideoSource>;
+	const body = (await req.json().catch(() => ({}))) as Partial<VideoSource> & {
+		action?: string;
+		limit?: number;
+		probes?: number;
+		streak?: number;
+	};
+	if (body.action === "health_check") {
+		const result = await runHealthCheck(env.AURORA_DB, {
+			limit: body.limit,
+			probes: body.probes,
+			streak: body.streak,
+		});
+		return NextResponse.json({ code: 200, ...result });
+	}
 	if (!body.name || !body.api)
 		return NextResponse.json({ code: 400, msg: "name 和 api 为必填" }, { status: 400 });
 	const id = body.id ? String(body.id) : makeSourceId(String(body.name), String(body.api));
@@ -57,6 +75,7 @@ export async function PATCH(req: NextRequest) {
 	const body = (await req.json().catch(() => ({}))) as { id?: string; enabled?: boolean };
 	if (!body.id) return NextResponse.json({ code: 400, msg: "缺少 id" }, { status: 400 });
 	await setSourceEnabled(env.AURORA_DB, body.id, body.enabled !== false);
+	if (body.enabled !== false) await clearSourceAutoDisabled(env.AURORA_DB, body.id);
 	return NextResponse.json({ code: 200 });
 }
 

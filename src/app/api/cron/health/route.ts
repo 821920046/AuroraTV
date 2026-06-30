@@ -1,10 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { getEnabledSources } from "@/lib/sources";
-import { upsertSourceHealth } from "@/lib/db";
-import { computeScore } from "@/lib/scoring";
+import { runHealthCheck } from "@/lib/health";
 
 // 由 workers/scheduler 或外部定时服务调用，需携带 ?secret=CRON_SECRET
+// 可选调参：?limit= 单次探活源数 ?probes= 每源探测次数 ?streak= 连续失败几轮自动停用
 export async function GET(req: NextRequest) {
 	const { env } = getCloudflareContext();
 	const secret = req.nextUrl.searchParams.get("secret");
@@ -12,43 +11,15 @@ export async function GET(req: NextRequest) {
 		return NextResponse.json({ code: 401 }, { status: 401 });
 	if (!env.AURORA_DB) return NextResponse.json({ code: 500, msg: "no db" }, { status: 500 });
 
-	const now = Date.now();
-	const db = env.AURORA_DB;
-	const sources = await getEnabledSources(db);
-	const results = await Promise.allSettled(
-		sources.map(async (s) => {
-			const probes = 3;
-			let ok = 0;
-			let totalMs = 0;
-			let timeouts = 0;
-			for (let i = 0; i < probes; i++) {
-				const ctrl = new AbortController();
-				const t = setTimeout(() => ctrl.abort(), 3000);
-				const start = Date.now();
-				try {
-					const r = await fetch(`${s.api}?ac=list`, { signal: ctrl.signal });
-					if (r.ok) ok++;
-					totalMs += Date.now() - start;
-				} catch {
-					timeouts++;
-					totalMs += 3000;
-				} finally {
-					clearTimeout(t);
-				}
-			}
-			const successRate = ok / probes;
-			const avg = Math.round(totalMs / probes);
-			const score = computeScore({ successRate, avgLatencyMs: avg, timeouts });
-			await upsertSourceHealth(db, {
-				source_id: s.id,
-				success_rate: successRate,
-				avg_latency_ms: avg,
-				score,
-				updated_at: now,
-			});
-			return s.id;
-		}),
-	);
-	const checked = results.filter((r) => r.status === "fulfilled").length;
-	return NextResponse.json({ code: 200, checked });
+	const sp = req.nextUrl.searchParams;
+	const num = (k: string) => {
+		const v = Number(sp.get(k));
+		return Number.isFinite(v) && v > 0 ? v : undefined;
+	};
+	const result = await runHealthCheck(env.AURORA_DB, {
+		limit: num("limit"),
+		probes: num("probes"),
+		streak: num("streak"),
+	});
+	return NextResponse.json({ code: 200, ...result });
 }
