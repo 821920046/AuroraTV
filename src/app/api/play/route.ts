@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { fetchDetail, parsePlayUrl } from "@/lib/aggregator";
+import { fetchDetail, pickPlayGroup } from "@/lib/aggregator";
 import { getEnabledSources } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
@@ -16,8 +16,9 @@ export async function GET(req: NextRequest) {
 	const { env } = getCloudflareContext();
 	const sources = await getEnabledSources(env.AURORA_DB);
 	const detail = await fetchDetail(sources, sourceId, vodId);
-	const raw = String(detail?.vod_play_url ?? "");
-	const episodes = parsePlayUrl(raw);
+	const rawUrl = String(detail?.vod_play_url ?? "");
+	const rawFrom = String(detail?.vod_play_from ?? "");
+	const episodes = pickPlayGroup(rawUrl, rawFrom);
 
 	const current = episodes[ep] ?? episodes[0];
 	if (!current) return NextResponse.json({ code: 404, msg: "no playable url" }, { status: 404 });

@@ -251,3 +251,47 @@ export async function aggregateRecent(
 		tv: dedupeRecent(allTv).sort(byRecency),
 	};
 }
+
+// ---- 点播取流：智能挑选可直连的播放组 ----
+// MacCMS 的 vod_play_url 常有多组（$$$ 分隔），与 vod_play_from 一一对应。
+// 很多源第一组是 qq/爱奇艺/优酷等需要解析的云链接（非直链），
+// 直接取第一组会导致“全部无法播放”。这里挑选直链占比最高、且非云解析源的播放组。
+const CLOUD_SOURCE_RE =
+	/qq|qiyi|iqiyi|youku|优酷|腾讯|爱奇艺|mgtv|芒果|letv|乐视|sohu|搜狐|pptv|bilibili|哔哩|xigua|网盘|magnet|百度|ed2k/i;
+
+function isDirectUrl(u: string): boolean {
+	return /\.m3u8|\.mp4|\.flv|\.ts(\?|$)/i.test(u);
+}
+
+function parseGroup(group: string): Episode[] {
+	return (group ?? "")
+		.split("#")
+		.map((seg) => {
+			const [name, url] = seg.split("$");
+			return { name: name ?? "", url: url ?? "" };
+		})
+		.filter((e) => e.url);
+}
+
+export function pickPlayGroup(vodPlayUrl: string, vodPlayFrom?: string): Episode[] {
+	const urlGroups = (vodPlayUrl ?? "").split("$$$");
+	const fromGroups = (vodPlayFrom ?? "").split("$$$");
+	let best: Episode[] = [];
+	let bestScore = -Infinity;
+	for (let i = 0; i < urlGroups.length; i++) {
+		const eps = parseGroup(urlGroups[i]);
+		if (eps.length === 0) continue;
+		const fromName = fromGroups[i] ?? "";
+		const directCount = eps.filter((e) => isDirectUrl(e.url)).length;
+		let score = directCount / eps.length;
+		if (directCount === 0) score -= 1; // 完全无直链（多为网页/云链接）大幅降权
+		if (CLOUD_SOURCE_RE.test(fromName)) score -= 1; // 已知云解析源降权
+		if (score > bestScore) {
+			bestScore = score;
+			best = eps;
+		}
+	}
+	// 全都没有直链时，退回第一组
+	if (best.length === 0 && urlGroups.length > 0) best = parseGroup(urlGroups[0]);
+	return best;
+}
