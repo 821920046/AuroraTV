@@ -11,8 +11,6 @@ type Item = {
 	remarks?: string;
 };
 
-const HOT = ["热门电影", "最新剧集", "动漫", "综艺", "纪录片"];
-
 export default function Home() {
 	const [kw, setKw] = useState("");
 	const [list, setList] = useState<Item[]>([]);
@@ -112,13 +110,6 @@ export default function Home() {
 						<button className="search-btn" onClick={() => search()} disabled={loading}>
 							{loading ? "搜索中…" : "搜索"}
 						</button>
-					</div>
-					<div className="chips">
-						{HOT.map((h) => (
-							<button key={h} className="chip" onClick={() => search(h)}>
-								{h}
-							</button>
-						))}
 					</div>
 				</section>
 

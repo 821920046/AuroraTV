@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { aggregateRecent, classifyRecent } from "@/lib/aggregator";
+import { aggregateRecent } from "@/lib/aggregator";
 import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
 import { getSourceHealthMap } from "@/lib/db";
 import { getEnabledSources } from "@/lib/sources";
@@ -19,8 +19,7 @@ export async function GET() {
 
 		const sources = await getEnabledSources(env.AURORA_DB);
 		const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : undefined;
-		const recent = await aggregateRecent(sources, health);
-		const { movies, tv } = classifyRecent(recent);
+		const { movies, tv } = await aggregateRecent(sources, health);
 		const result = { movies: movies.slice(0, 12), tv: tv.slice(0, 12) };
 
 		await cacheSetWithKv(key, result, env, 60 * 60 * 3, true);

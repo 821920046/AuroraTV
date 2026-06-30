@@ -25,6 +25,16 @@ async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
 	}
 }
 
+async function fetchJson(url: string): Promise<Record<string, unknown> | null> {
+	try {
+		const res = await fetchWithTimeout(url, TIMEOUT_MS);
+		if (!res.ok) return null;
+		return (await res.json()) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
 // 按健康评分（或静态权重）排序，取前 MAX_FANOUT 个源
 function pickSources(sources: VideoSource[], health?: Record<string, SourceHealth>): VideoSource[] {
 	const list = sources.filter((s) => s.enabled !== false);
@@ -106,36 +116,56 @@ function dedupe(items: SearchItem[]): SearchItem[] {
 }
 
 // ---- 首页「近期热播」聚合 ----
-// 通过 MacCMS 的 ac=detail&pg=1 拉取各源「最近更新」的条目（含 vod_pic 海报），
-// 合并去重后按类型分桶为 电影 / 电视剧。pg=1 即最新更新页，天然反映近期热播。
+// 为什么不能只拉「最近更新页」：采集站的最近更新几乎都是剧集/动漫（每日更新集数），
+// 电影占比极低，会导致首页只有剧集。因此改为「按类目精准抓取」：
+// 先拉分类表（ac=list 的 class）定位电影/电视剧类目 id，再分别取最新一页（带海报）。
 export type RecentItem = SearchItem & { type_name?: string };
 
-export async function aggregateRecent(
-	sources: VideoSource[],
-	health?: Record<string, SourceHealth>,
-	maxSources = 4,
-): Promise<RecentItem[]> {
-	const picked = pickSources(sources, health).slice(0, maxSources);
-	const tasks = picked.map(async (s) => {
-		const url = `${s.api}?ac=detail&pg=1`;
-		const res = await fetchWithTimeout(url, TIMEOUT_MS);
-		if (!res.ok) throw new Error(`source ${s.id} ${res.status}`);
-		const data = (await res.json()) as { list?: Array<Record<string, unknown>> };
-		const list = data?.list ?? [];
-		return list.map((v) => ({
-			source_id: s.id,
-			vod_id: String(v.vod_id),
-			title: String(v.vod_name ?? ""),
-			poster: v.vod_pic ? String(v.vod_pic) : undefined,
-			year: v.vod_year ? Number(v.vod_year) : undefined,
-			remarks: v.vod_remarks ? String(v.vod_remarks) : undefined,
-			type_name: v.type_name ? String(v.type_name) : undefined,
-		})) as RecentItem[];
-	});
-	const settled = await Promise.allSettled(tasks);
-	const merged: RecentItem[] = [];
-	for (const r of settled) if (r.status === "fulfilled") merged.push(...r.value);
-	return dedupeRecent(merged);
+type ClassItem = { type_id: number; type_name: string };
+
+function mapRow(sourceId: string, v: Record<string, unknown>): RecentItem {
+	return {
+		source_id: sourceId,
+		vod_id: String(v.vod_id),
+		title: String(v.vod_name ?? ""),
+		poster: v.vod_pic ? String(v.vod_pic) : undefined,
+		year: v.vod_year ? Number(v.vod_year) : undefined,
+		remarks: v.vod_remarks ? String(v.vod_remarks) : undefined,
+		type_name: v.type_name ? String(v.type_name) : undefined,
+	};
+}
+
+function asList(data: Record<string, unknown> | null): Array<Record<string, unknown>> {
+	const l = (data as { list?: unknown })?.list;
+	return Array.isArray(l) ? (l as Array<Record<string, unknown>>) : [];
+}
+
+function isTvName(n: string): boolean {
+	return /剧|电视|连续/.test(n);
+}
+
+function isMovieName(n: string): boolean {
+	return /电影|影片|片/.test(n) && !/动漫|动画|综艺/.test(n);
+}
+
+// 从 MacCMS 的 class 分类表里挑出电影 / 电视剧类目 id
+function pickCategoryIds(classes: ClassItem[]): { movieIds: number[]; tvIds: number[] } {
+	const movieIds: number[] = [];
+	const tvIds: number[] = [];
+	for (const c of classes) {
+		const n = c.type_name ?? "";
+		if (Number.isNaN(c.type_id)) continue;
+		if (isTvName(n)) tvIds.push(c.type_id);
+		else if (isMovieName(n)) movieIds.push(c.type_id);
+	}
+	return { movieIds, tvIds };
+}
+
+function byRecency(a: RecentItem, b: RecentItem): number {
+	const pa = a.poster ? 1 : 0;
+	const pb = b.poster ? 1 : 0;
+	if (pa !== pb) return pb - pa;
+	return (b.year ?? 0) - (a.year ?? 0);
 }
 
 function dedupeRecent(items: RecentItem[]): RecentItem[] {
@@ -152,27 +182,72 @@ function dedupeRecent(items: RecentItem[]): RecentItem[] {
 	return out;
 }
 
-// 有海报的优先，其次按年份降序（近期作品靠前）
-function byRecency(a: RecentItem, b: RecentItem): number {
-	const pa = a.poster ? 1 : 0;
-	const pb = b.poster ? 1 : 0;
-	if (pa !== pb) return pb - pa;
-	return (b.year ?? 0) - (a.year ?? 0);
+async function fetchCategory(
+	s: VideoSource,
+	ids: number[],
+): Promise<RecentItem[]> {
+	const out: RecentItem[] = [];
+	// 取前两个匹配类目（如「电影」与某热门子类），控制子请求数
+	for (const id of ids.slice(0, 2)) {
+		const data = await fetchJson(`${s.api}?ac=detail&t=${id}&pg=1`);
+		for (const v of asList(data)) out.push(mapRow(s.id, v));
+	}
+	return out;
 }
 
-export function classifyRecent(items: RecentItem[]): { movies: RecentItem[]; tv: RecentItem[] } {
-	const movies: RecentItem[] = [];
-	const tv: RecentItem[] = [];
-	for (const it of items) {
-		const t = it.type_name ?? "";
-		if (/剧|电视|连续/.test(t)) tv.push(it);
-		else if (/电影|影片|片/.test(t)) movies.push(it);
+export async function aggregateRecent(
+	sources: VideoSource[],
+	health?: Record<string, SourceHealth>,
+	maxSources = 4,
+): Promise<{ movies: RecentItem[]; tv: RecentItem[] }> {
+	const picked = pickSources(sources, health).slice(0, maxSources);
+	const tasks = picked.map(async (s) => {
+		const movies: RecentItem[] = [];
+		const tv: RecentItem[] = [];
+
+		// 1) 拉分类表，定位「电影」「电视剧」类目 id
+		const listData = await fetchJson(`${s.api}?ac=list`);
+		const rawClass = Array.isArray((listData as { class?: unknown })?.class)
+			? (listData as { class: Array<Record<string, unknown>> }).class
+			: [];
+		const classes: ClassItem[] = rawClass.map((c) => ({
+			type_id: Number(c.type_id),
+			type_name: String(c.type_name ?? ""),
+		}));
+		const { movieIds, tvIds } = pickCategoryIds(classes);
+
+		// 2) 按类目分别取最新一页（带 vod_pic 海报）
+		const [m, t] = await Promise.all([
+			movieIds.length ? fetchCategory(s, movieIds) : Promise.resolve([] as RecentItem[]),
+			tvIds.length ? fetchCategory(s, tvIds) : Promise.resolve([] as RecentItem[]),
+		]);
+		movies.push(...m);
+		tv.push(...t);
+
+		// 3) 兜底：分类识别失败时，退回混合最新页并按名称归类
+		if (movies.length === 0 && tv.length === 0) {
+			const mixed = await fetchJson(`${s.api}?ac=detail&pg=1`);
+			for (const v of asList(mixed)) {
+				const item = mapRow(s.id, v);
+				const tn = item.type_name ?? "";
+				if (isTvName(tn)) tv.push(item);
+				else if (isMovieName(tn)) movies.push(item);
+			}
+		}
+		return { movies, tv };
+	});
+
+	const settled = await Promise.allSettled(tasks);
+	const allMovies: RecentItem[] = [];
+	const allTv: RecentItem[] = [];
+	for (const r of settled) {
+		if (r.status === "fulfilled") {
+			allMovies.push(...r.value.movies);
+			allTv.push(...r.value.tv);
+		}
 	}
-	// 若分类信息缺失导致两桶皆空，则把全部并入电影，避免首页空白
-	if (movies.length === 0 && tv.length === 0 && items.length > 0) {
-		movies.push(...items);
-	}
-	movies.sort(byRecency);
-	tv.sort(byRecency);
-	return { movies, tv };
+	return {
+		movies: dedupeRecent(allMovies).sort(byRecency),
+		tv: dedupeRecent(allTv).sort(byRecency),
+	};
 }
