@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Player from "@/components/Player";
 
 type Item = {
@@ -20,6 +20,25 @@ export default function Home() {
 	const [searched, setSearched] = useState(false);
 	const [playUrl, setPlayUrl] = useState<string | null>(null);
 	const [playSource, setPlaySource] = useState<string | undefined>();
+	const [movies, setMovies] = useState<Item[]>([]);
+	const [tv, setTv] = useState<Item[]>([]);
+	const [homeLoading, setHomeLoading] = useState(true);
+
+	useEffect(() => {
+		(async () => {
+			try {
+				const r = await fetch("/api/home");
+				const data = (await r.json()) as { movies?: Item[]; tv?: Item[] };
+				setMovies(data.movies ?? []);
+				setTv(data.tv ?? []);
+			} catch {
+				setMovies([]);
+				setTv([]);
+			} finally {
+				setHomeLoading(false);
+			}
+		})();
+	}, []);
 
 	async function search(term?: string) {
 		const q = (term ?? kw).trim();
@@ -46,6 +65,24 @@ export default function Home() {
 			setPlaySource(it.source_id);
 		}
 	}
+
+	const renderCard = (it: Item) => (
+		<div key={it.source_id + ":" + it.vod_id} className="card" onClick={() => play(it)}>
+			<div className="poster-box">
+				{/* eslint-disable-next-line @next/next/no-img-element */}
+				{it.poster ? (
+					<img className="poster" src={it.poster} alt={it.title} />
+				) : (
+					<div className="poster-fallback">{it.title.slice(0, 1)}</div>
+				)}
+				<div className="play-overlay">▶</div>
+			</div>
+			<div className="card-body">
+				<div className="card-title">{it.title}</div>
+				<div className="card-meta">{(it.year ?? "") + " " + (it.remarks ?? "")}</div>
+			</div>
+		</div>
+	);
 
 	return (
 		<>
@@ -146,11 +183,44 @@ export default function Home() {
 				)}
 
 				{!loading && !searched && (
-					<div className="empty">
-						<div className="emoji">🌌</div>
-						<h3>开始你的观影之旅</h3>
-						<p>在上方输入片名搜索，或点击热门标签快速发现内容。AuroraTV 会从多个片源中为你择优播放。</p>
-					</div>
+					<>
+						{homeLoading && (
+							<div className="grid">
+								{Array.from({ length: 12 }).map((_, i) => (
+									<div className="skeleton" key={i}>
+										<div className="sk-poster" />
+										<div className="sk-line" />
+										<div className="sk-line short" />
+									</div>
+								))}
+							</div>
+						)}
+						{!homeLoading && movies.length > 0 && (
+							<>
+								<div className="section-head">
+									<h2>热门电影</h2>
+									<span>近期热播</span>
+								</div>
+								<div className="grid">{movies.map(renderCard)}</div>
+							</>
+						)}
+						{!homeLoading && tv.length > 0 && (
+							<>
+								<div className="section-head">
+									<h2>热门电视剧</h2>
+									<span>近期热播</span>
+								</div>
+								<div className="grid">{tv.map(renderCard)}</div>
+							</>
+						)}
+						{!homeLoading && movies.length === 0 && tv.length === 0 && (
+							<div className="empty">
+								<div className="emoji">🌌</div>
+								<h3>开始你的观影之旅</h3>
+								<p>在上方输入片名搜索。若此处长期为空，可能是后台片源暂时无法返回最新列表，可到「片源管理」点「立即体检」。</p>
+							</div>
+						)}
+					</>
 				)}
 
 				<footer className="site-footer">
