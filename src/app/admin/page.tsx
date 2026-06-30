@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import LiveAdmin from "@/components/LiveAdmin";
 
 type SourceItem = {
@@ -20,6 +20,7 @@ export default function Admin() {
 	const [sources, setSources] = useState<SourceItem[]>([]);
 	const [msg, setMsg] = useState("");
 	const [busy, setBusy] = useState(false);
+	const fileRef = useRef<HTMLInputElement>(null);
 
 	const [name, setName] = useState("");
 	const [api, setApi] = useState("");
@@ -154,6 +155,56 @@ export default function Admin() {
 		}
 	}
 
+	function exportBackup() {
+		try {
+			const payload = {
+				app: "AuroraTV",
+				version: 1,
+				exportedAt: new Date().toISOString(),
+				sources: sources.map((s) => ({
+					id: s.id,
+					name: s.name,
+					api: s.api,
+					detail: s.detail,
+					weight: s.weight ?? 1,
+					enabled: s.enabled !== false,
+				})),
+			};
+			const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+			const a = document.createElement("a");
+			a.href = URL.createObjectURL(blob);
+			a.download = "auroratv-sources-" + new Date().toISOString().slice(0, 10) + ".json";
+			a.click();
+			URL.revokeObjectURL(a.href);
+			setMsg("已导出 " + sources.length + " 个片源到备份文件");
+		} catch {
+			setMsg("导出失败");
+		}
+	}
+
+	async function onPickBackup(e: ChangeEvent<HTMLInputElement>) {
+		const file = e.target.files?.[0];
+		e.target.value = "";
+		if (!file) return;
+		setBusy(true);
+		setMsg("正在导入备份…");
+		try {
+			const text = await file.text();
+			const r = await fetch("/api/admin/import", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text }),
+			});
+			const d = (await r.json()) as { imported?: number; msg?: string };
+			setMsg(r.ok ? "成功导入 " + (d.imported ?? 0) + " 个片源" : "导入失败: " + (d.msg ?? r.status));
+			if (r.ok) await load();
+		} catch {
+			setMsg("读取备份文件失败");
+		} finally {
+			setBusy(false);
+		}
+	}
+
 	return (
 		<>
 			<header className="site-header">
@@ -195,6 +246,22 @@ export default function Admin() {
 					<button className="search-btn" onClick={doImport} disabled={busy}>
 						{busy ? "处理中…" : "导入"}
 					</button>
+				</section>
+
+				<section className="admin-card">
+					<h2>备份与恢复</h2>
+					<p className="admin-hint">
+						把当前所有片源配置导出为 JSON 备份文件保存；换环境或重置后可一键导入恢复（按 id 覆盖，不会重复）。
+					</p>
+					<div className="head-actions">
+						<button className="pill on" onClick={exportBackup} disabled={sources.length === 0}>
+							导出备份（{sources.length}）
+						</button>
+						<button className="pill on" onClick={() => fileRef.current?.click()} disabled={busy}>
+							一键导入备份
+						</button>
+						<input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={onPickBackup} />
+					</div>
 				</section>
 
 				<section className="admin-card">

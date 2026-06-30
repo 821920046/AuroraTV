@@ -8,9 +8,21 @@ type Props = {
 	onAllFailed?: () => void;
 };
 
+// 仅对“域名 + 标准端口”的 http 源尝试升级 https；裸 IP 或带端口的源升级几乎必然 SSL 报错，直接跳过。
+function canUpgradeHttps(u: string): boolean {
+	try {
+		const h = new URL(u);
+		if (h.protocol !== "http:") return false;
+		const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(h.hostname);
+		if (isIp) return false;
+		if (h.port && h.port !== "80") return false;
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 // 播放器：HLS(hls.js) -> 原生 HLS / 直链(video) -> 失败提示。
-// https 站点无法直接加载 http 流（混合内容），故先尝试把 http 升级为 https 再播，
-// 升级仍失败再显示失败面板（并保留原始地址供 VLC/PotPlayer 使用）。
 export default function Player({ url, sourceId, onAllFailed }: Props) {
 	const videoRef = useRef<HTMLVideoElement>(null);
 	const [failed, setFailed] = useState(false);
@@ -19,12 +31,18 @@ export default function Player({ url, sourceId, onAllFailed }: Props) {
 	const isHttps =
 		typeof window !== "undefined" && window.location.protocol === "https:";
 	const wasHttp = url.startsWith("http://");
-	// https 页面里 http 流会被拦截 → 尝试升级 https 播放
-	const playUrl = isHttps && wasHttp ? url.replace(/^http:\/\//, "https://") : url;
+	const canUp = canUpgradeHttps(url);
+	const playUrl = isHttps && wasHttp && canUp ? url.replace(/^http:\/\//, "https://") : url;
+	// 裸 IP / 带端口的 http 源在 https 页面里必被拦截且无法升级 → 直接判失败，省去 8 秒等待
+	const willBlock = isHttps && wasHttp && !canUp;
 
 	useEffect(() => {
 		setFailed(false);
 		setCopied(false);
+		if (willBlock) {
+			setFailed(true);
+			return;
+		}
 		const video = videoRef.current;
 		if (!video) return;
 
@@ -65,7 +83,7 @@ export default function Player({ url, sourceId, onAllFailed }: Props) {
 			video.removeEventListener("error", onError);
 			hls?.destroy();
 		};
-	}, [playUrl, sourceId]);
+	}, [playUrl, sourceId, willBlock]);
 
 	function copy() {
 		navigator.clipboard?.writeText(url).then(
@@ -81,8 +99,8 @@ export default function Player({ url, sourceId, onAllFailed }: Props) {
 				<h3>无法播放这个资源</h3>
 				<p className="player-fail-msg">
 					{wasHttp && isHttps
-						? "该源是 http 地址，https 站点会被浏览器拦截（混合内容），已尝试升级 https 仍失败。"
-						: "源不可达或受地区限制（常见为 523 / 拒绝连接 / 仅限境内网络）。"}
+						? "该源是 http 地址，https 站点会被浏览器拦截（混合内容）；这类源请复制地址到 VLC/PotPlayer 播放。"
+						: "源不可达 / 跨域(CORS)被拦 / 受地区限制（常见为 403、523、拒绝连接、仅限境内网络）。"}
 				</p>
 				<p className="player-fail-url">{url}</p>
 				<div className="player-fail-actions">
