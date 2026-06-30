@@ -86,6 +86,27 @@ export default function LiveAdmin() {
 		}
 	}
 
+	async function addRecommended() {
+		setBusy(true);
+		setMsg("正在添加推荐国内源…");
+		try {
+			const r = await fetch("/api/admin/live", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ action: "add_recommended" }),
+			});
+			const d = (await r.json()) as { added?: number; msg?: string };
+			setMsg(
+				r.ok
+					? "已添加 " + (d.added ?? 0) + " 个推荐国内源，请点「立即刷新频道」摄取"
+					: "添加失败：" + (d.msg ?? r.status),
+			);
+			await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
 	async function pruneToCnHk() {
 		if (!confirm("只保留「国内 + 香港」频道，其余全部删除？")) return;
 		setBusy(true);
@@ -142,8 +163,9 @@ export default function LiveAdmin() {
 				</div>
 			</div>
 			<p className="admin-hint">
-				添加 M3U/M3U8 播放列表订阅（如 Free-TV/IPTV 的 playlist.m3u8）。为空时默认使用
-				Free-TV/IPTV 全球免费源。摄取后可在「直播」页观看。
+				添加 M3U/M3U8 播放列表订阅，或点「一键添加推荐国内源」（vbskycn / 范明明 / YanG /
+				iptv-org 等国内常用直连源，整表入库不做地区过滤）。添加后点「立即刷新频道」摄取，即可在
+				「直播」页观看。部分源为 IPv6 专用，无 IPv6 网络优先用 vbskycn IPv4 源。
 			</p>
 			{msg && <div className="admin-msg">{msg}</div>}
 			<div className="field-row">
@@ -163,6 +185,9 @@ export default function LiveAdmin() {
 			</div>
 			<button className="search-btn" onClick={add} disabled={busy}>
 				添加订阅源
+			</button>{" "}
+			<button className="pill on" onClick={addRecommended} disabled={busy}>
+				一键添加推荐国内源
 			</button>
 
 			{sources.length > 0 && (

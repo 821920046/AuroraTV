@@ -18,27 +18,112 @@ export type Channel = {
 	active?: boolean;
 };
 
-export type LiveSource = { id: string; name: string; url: string; enabled?: boolean };
+export type LiveSource = {
+	id: string;
+	name: string;
+	url: string;
+	enabled?: boolean;
+	// keepAll=true 的为「国内专用源」：频道整表入库，不经地区白名单过滤
+	//（这类源的 group-title 多为 央视/卫视/分类名，无法用 China/Hong Kong 精确匹配）。
+	keepAll?: boolean;
+};
 
-// 内置默认直播订阅（Free-TV/IPTV 全球免费频道）。
-// 仅当 live_source 表为空时作为兜底，站长可在 /admin 增删覆盖。
+// 推荐国内源（一键添加 / 默认内置）。均为「国内专用源」keepAll=true：整表入库、不做地区过滤。
+// 链接均为公开、长期维护的直连 M3U。注意：部分源为 IPv6 专用（需本机支持 IPv6），
+// 无 IPv6 网络优先用 vbskycn IPv4 源。源会失效/更换，失效时可在 /admin 删除或替换。
+export const RECOMMENDED_CN_SOURCES: LiveSource[] = [
+	{
+		id: "cn_vbskycn_ipv4",
+		name: "国内聚合·vbskycn (IPv4)",
+		url: "https://live.zbds.org/tv/iptv4.m3u",
+		keepAll: true,
+	},
+	{
+		id: "cn_vbskycn_ipv6",
+		name: "国内聚合·vbskycn (IPv6)",
+		url: "https://live.zbds.org/tv/iptv6.m3u",
+		keepAll: true,
+	},
+	{
+		id: "cn_fanmingming_ipv6",
+		name: "范明明·央视卫视 (IPv6)",
+		url: "https://live.fanmingming.com/tv/m3u/ipv6.m3u",
+		keepAll: true,
+	},
+	{
+		id: "cn_yang1989_gather",
+		name: "YanG 聚合源 Gather",
+		url: "https://raw.githubusercontent.com/YanG-1989/m3u/main/Gather.m3u",
+		keepAll: true,
+	},
+	{
+		id: "cn_iptv_org",
+		name: "iptv-org·中国",
+		url: "https://iptv-org.github.io/iptv/countries/cn.m3u",
+		keepAll: true,
+	},
+];
+
+export const RECOMMENDED_SOURCE_IDS = new Set(RECOMMENDED_CN_SOURCES.map((s) => s.id));
+
+// 内置默认直播订阅。仅当 live_source 表为空时作为兜底，站长可在 /admin 增删覆盖。
+// Free-TV/IPTV 为全球源（按地区白名单只取国内/香港）；其余为国内专用源（keepAll）。
 export const DEFAULT_LIVE_SOURCES: LiveSource[] = [
 	{
 		id: "free_tv_iptv",
 		name: "Free-TV/IPTV",
 		url: "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8",
 	},
+	...RECOMMENDED_CN_SOURCES,
 ];
 
-// 地区白名单：只保留这些 group-title 的频道（对应 Free-TV/IPTV 的 china.md / hong_kong.md 的 <h1>）。
-// 置为空数组 [] 表示不过滤、保留全部。匹配对大小写/首尾空格不敏感。
+// 地区白名单：用于「全球源」(如 Free-TV) 的地区过滤与「只留国内/香港」清理。
+// 国内专用源(keepAll)不走这里。置为空数组 [] 表示不过滤、保留全部。
 // 想加台湾/澳门只需追加 "Taiwan" / "Macau"。
 export const REGION_ALLOWLIST: string[] = ["China", "Hong Kong"];
+
+// 国内/香港常见 group-title 关键词（小写、子串匹配），覆盖多源的中文分组名，
+// 让 isAllowedGroup / pruneChannels 不会误删 央视/卫视/CCTV/香港 等频道。
+const REGION_KEYWORDS = [
+	"china",
+	"hong kong",
+	"hongkong",
+	"中国",
+	"国内",
+	"央视",
+	"卫视",
+	"cctv",
+	"cgtn",
+	"凤凰",
+	"香港",
+	"tvb",
+	"翡翠",
+	"明珠",
+	"粤",
+	"数字",
+	"地方",
+	"少儿",
+	"体育",
+	"电影",
+	"影视",
+	"综合",
+	"综艺",
+	"纪录",
+	"教育",
+	"新闻",
+	"咪咕",
+	"migu",
+	"newtv",
+	"高清",
+	"4k",
+];
 
 function isAllowedGroup(group?: string | null): boolean {
 	if (REGION_ALLOWLIST.length === 0) return true;
 	const g = (group ?? "").trim().toLowerCase();
-	return REGION_ALLOWLIST.some((a) => a.trim().toLowerCase() === g);
+	if (!g) return false;
+	if (REGION_ALLOWLIST.some((a) => a.trim().toLowerCase() === g)) return true;
+	return REGION_KEYWORDS.some((k) => g.includes(k));
 }
 
 // Free-TV/IPTV 频道名尾部的标记：Ⓢ(非高清) Ⓖ(GeoIP) Ⓨ(YouTube)
@@ -230,8 +315,11 @@ export async function ingestChannels(
 			console.error("ingest fetch failed:", src.url, e);
 			continue;
 		}
-		// 只保留白名单地区（国内 / 香港），其余直接丢弃，不入库
-		const channels = parseM3U(text).filter((c) => isAllowedGroup(c.group_title));
+		// 国内专用源(keepAll)整表入库；其余全球源按地区白名单只取国内/香港
+		const keepAll = src.keepAll === true || RECOMMENDED_SOURCE_IDS.has(src.id);
+		const channels = keepAll
+			? parseM3U(text)
+			: parseM3U(text).filter((c) => isAllowedGroup(c.group_title));
 		if (channels.length === 0) continue;
 		okSources++;
 		for (let i = 0; i < channels.length; i += 50) {
@@ -373,13 +461,14 @@ export async function deleteLiveSource(db: D1Database, id: string): Promise<void
 // 一次性清理：删除不在白名单地区的已入库频道，返回删除数量。
 export async function pruneChannels(db: D1Database): Promise<number> {
 	if (REGION_ALLOWLIST.length === 0) return 0;
-	const lowered = REGION_ALLOWLIST.map((a) => a.trim().toLowerCase());
-	const placeholders = lowered.map((_, i) => "?" + (i + 1)).join(",");
+	const exact = REGION_ALLOWLIST.map((a) => a.trim().toLowerCase());
+	const exactClause = exact.map(() => "LOWER(TRIM(group_title)) = ?").join(" OR ");
+	const likeClause = REGION_KEYWORDS.map(() => "LOWER(group_title) LIKE ?").join(" OR ");
+	// 保留：精确命中白名单 或 分组名含国内/香港关键词；其余（含 NULL 分组）删除
+	const keep = `(${exactClause} OR ${likeClause})`;
 	const res = await db
-		.prepare(
-			`DELETE FROM channel WHERE group_title IS NULL OR LOWER(TRIM(group_title)) NOT IN (${placeholders})`,
-		)
-		.bind(...lowered)
+		.prepare(`DELETE FROM channel WHERE group_title IS NULL OR NOT ${keep}`)
+		.bind(...exact, ...REGION_KEYWORDS.map((k) => "%" + k + "%"))
 		.run();
 	const meta = (res as unknown as { meta?: { changes?: number } }).meta;
 	return meta?.changes ?? 0;

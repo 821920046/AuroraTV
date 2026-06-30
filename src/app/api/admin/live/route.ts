@@ -11,6 +11,7 @@ import {
 	clearChannels,
 	pruneChannels,
 	slugify,
+	RECOMMENDED_CN_SOURCES,
 	type LiveSource,
 } from "@/lib/live";
 
@@ -49,6 +50,15 @@ export async function POST(req: NextRequest) {
 		const deleted = await pruneChannels(env.AURORA_DB);
 		const channelCount = await getChannelCount(env.AURORA_DB);
 		return NextResponse.json({ code: 200, deleted, channelCount });
+	}
+
+	// 一键写入推荐国内源（已存在则按 id 覆盖更新）
+	if (body.action === "add_recommended") {
+		for (const s of RECOMMENDED_CN_SOURCES) {
+			await upsertLiveSource(env.AURORA_DB, { ...s, enabled: true });
+		}
+		const sources = await getLiveSources(env.AURORA_DB);
+		return NextResponse.json({ code: 200, added: RECOMMENDED_CN_SOURCES.length, sources });
 	}
 
 	if (!body.name || !body.url)

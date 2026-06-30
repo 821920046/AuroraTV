@@ -633,3 +633,39 @@ button:disabled {
 .live-admin-table {
 	margin-top: 16px;
 }
+
+/* 播放失败面板（直播/点播通用） */
+.player-fail {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 32px 20px;
+	text-align: center;
+	background: #0c1020;
+	border-radius: 12px;
+	min-height: 220px;
+}
+.player-fail .emoji {
+	font-size: 34px;
+}
+.player-fail-msg {
+	color: #9aa4bf;
+	max-width: 520px;
+}
+.player-fail-url {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+	color: #6b7693;
+	word-break: break-all;
+	max-width: 560px;
+}
+.player-fail-actions {
+	margin-top: 6px;
+}
+.player-fail-hint {
+	color: #6b7693;
+	font-size: 12px;
+	max-width: 520px;
+}
