@@ -23,6 +23,7 @@ export default function Home() {
 	const [movies, setMovies] = useState<Item[]>([]);
 	const [tv, setTv] = useState<Item[]>([]);
 	const [homeLoading, setHomeLoading] = useState(true);
+	const [webOnly, setWebOnly] = useState(true);
 
 	useEffect(() => {
 		(async () => {
@@ -40,6 +41,12 @@ export default function Home() {
 		})();
 	}, []);
 
+	// 切换「只看网页可播」时，若已搜索过则用新条件重搜。
+	useEffect(() => {
+		if (searched && kw.trim()) search();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [webOnly]);
+
 	async function search(term?: string) {
 		const q = (term ?? kw).trim();
 		if (!q) return;
@@ -47,7 +54,9 @@ export default function Home() {
 		setLoading(true);
 		setSearched(true);
 		try {
-			const r = await fetch("/api/search?wd=" + encodeURIComponent(q));
+			const r = await fetch(
+				"/api/search?wd=" + encodeURIComponent(q) + (webOnly ? "" : "&webOnly=0"),
+			);
 			const data = (await r.json()) as { list?: Item[] };
 			setList(data.list ?? []);
 		} catch {
@@ -164,6 +173,14 @@ export default function Home() {
 					<>
 						<div className="section-head">
 							<h2>搜索结果</h2>
+							<label className="web-only-toggle">
+								<input
+									type="checkbox"
+									checked={webOnly}
+									onChange={(e) => setWebOnly(e.target.checked)}
+								/>{" "}
+								只看网页可播 🌐
+							</label>
 							<span>共 {list.length} 条</span>
 						</div>
 						<div className="grid">

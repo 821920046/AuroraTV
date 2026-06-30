@@ -36,9 +36,22 @@ async function fetchJson(url: string): Promise<Record<string, unknown> | null> {
 }
 
 // 按健康评分（或静态权重）排序，取前 MAX_FANOUT 个源
-function pickSources(sources: VideoSource[], health?: Record<string, SourceHealth>): VideoSource[] {
-	const list = sources.filter((s) => s.enabled !== false);
+function pickSources(
+	sources: VideoSource[],
+	health?: Record<string, SourceHealth>,
+	webOnly = false,
+): VideoSource[] {
+	let list = sources.filter((s) => s.enabled !== false);
+	// webOnly：仅保留「网页可播」(cors===1) 的源；若一个都没检测出来则退回全部，避免空结果。
+	if (webOnly) {
+		const playable = list.filter((s) => health?.[s.id]?.cors === 1);
+		if (playable.length > 0) list = playable;
+	}
 	list.sort((a, b) => {
+		// 🌐 网页可播优先，其次按健康评分/权重
+		const ca = health?.[a.id]?.cors === 1 ? 1 : 0;
+		const cb = health?.[b.id]?.cors === 1 ? 1 : 0;
+		if (ca !== cb) return cb - ca;
 		const sa = health?.[a.id]?.score ?? a.weight ?? 0;
 		const sb = health?.[b.id]?.score ?? b.weight ?? 0;
 		return sb - sa;
@@ -50,8 +63,9 @@ export async function aggregateSearch(
 	keyword: string,
 	sources: VideoSource[],
 	health?: Record<string, SourceHealth>,
+	webOnly = false,
 ): Promise<SearchItem[]> {
-	const picked = pickSources(sources, health);
+	const picked = pickSources(sources, health, webOnly);
 	const tasks = picked.map(async (s) => {
 		const url = `${s.api}?ac=detail&wd=${encodeURIComponent(keyword)}`;
 		const res = await fetchWithTimeout(url, TIMEOUT_MS);
@@ -202,8 +216,9 @@ export async function aggregateRecent(
 	sources: VideoSource[],
 	health?: Record<string, SourceHealth>,
 	maxSources = 4,
+	webOnly = false,
 ): Promise<{ movies: RecentItem[]; tv: RecentItem[] }> {
-	const picked = pickSources(sources, health).slice(0, maxSources);
+	const picked = pickSources(sources, health, webOnly).slice(0, maxSources);
 	const tasks = picked.map(async (s) => {
 		const movies: RecentItem[] = [];
 		const tv: RecentItem[] = [];

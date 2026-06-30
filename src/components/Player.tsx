@@ -92,6 +92,26 @@ export default function Player({ url, sourceId, onAllFailed }: Props) {
 		);
 	}
 
+	// 用 VLC 打开：vlc:// 协议在移动端 VLC / 已注册该协议的桌面端可直接唤起。
+	function openVlc() {
+		window.location.href = "vlc://" + url;
+	}
+
+	// 下载 .strm 播放文件：内容就是播放地址，双击即用系统默认播放器（VLC/PotPlayer）打开，绕过浏览器 CORS。
+	function downloadStrm() {
+		try {
+			const blob = new Blob([url], { type: "application/octet-stream" });
+			const a = document.createElement("a");
+			a.href = URL.createObjectURL(blob);
+			a.download = "aurora-play.strm";
+			a.click();
+			// 延迟释放，避免部分浏览器在下载开始前就撤销 Blob URL
+			setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+		} catch {
+			/* ignore */
+		}
+	}
+
 	if (failed) {
 		return (
 			<div className="player-fail">
@@ -107,12 +127,18 @@ export default function Player({ url, sourceId, onAllFailed }: Props) {
 					<button className="pill on" onClick={copy}>
 						{copied ? "已复制" : "复制地址"}
 					</button>{" "}
+					<button className="pill on" onClick={openVlc}>
+						用 VLC 打开
+					</button>{" "}
+					<button className="pill on" onClick={downloadStrm}>
+						下载播放文件
+					</button>{" "}
 					<button className="pill danger" onClick={onAllFailed}>
 						关闭并重选
 					</button>
 				</div>
 				<p className="player-fail-hint">
-					可把地址粘到 VLC / PotPlayer 等播放器打开；受地区限制的源需在对应地区网络下才能播。
+					「用 VLC 打开」在手机/已装 VLC 的电脑可直接唤起；电脑端推荐点「下载播放文件」(.strm)，双击即用 VLC / PotPlayer 播放，绕过浏览器跨域限制。受地区限制的源需在对应地区网络下才能播。
 				</p>
 			</div>
 		);

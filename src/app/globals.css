@@ -263,6 +263,22 @@ button:disabled {
 	font-size: 13px;
 }
 
+.web-only-toggle {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	color: var(--muted);
+	font-size: 13px;
+	cursor: pointer;
+	user-select: none;
+}
+
+.web-only-toggle input {
+	accent-color: #7c5cff;
+	cursor: pointer;
+}
+
 .grid {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));

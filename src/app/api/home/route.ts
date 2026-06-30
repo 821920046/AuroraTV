@@ -19,7 +19,8 @@ export async function GET() {
 
 		const sources = await getEnabledSources(env.AURORA_DB);
 		const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : undefined;
-		const { movies, tv } = await aggregateRecent(sources, health);
+		// 首页只展示「网页可播」的源（无检测数据时自动退回全部）。
+		const { movies, tv } = await aggregateRecent(sources, health, 4, true);
 		const result = { movies: movies.slice(0, 12), tv: tv.slice(0, 12) };
 
 		await cacheSetWithKv(key, result, env, 60 * 60 * 3, true);
