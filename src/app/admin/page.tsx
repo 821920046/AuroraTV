@@ -13,6 +13,7 @@ type SourceItem = {
 	auto_disabled?: number;
 	fail_streak?: number;
 	last_ok_at?: number | null;
+	cors?: number | null;
 };
 
 export default function Admin() {
@@ -95,6 +96,38 @@ export default function Admin() {
 							(d.recovered ?? 0) +
 							" 个"
 					: "体检失败: " + (d.msg ?? r.status),
+			);
+			if (r.ok) await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function corsCheck() {
+		setBusy(true);
+		setMsg("正在检测各源在网页内是否可播（读取跨域响应头）…");
+		try {
+			const r = await fetch("/api/admin/sources", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ action: "cors_check" }),
+			});
+			const d = (await r.json()) as {
+				checked?: number;
+				playable?: number;
+				blocked?: number;
+				msg?: string;
+			};
+			setMsg(
+				r.ok
+					? "网页可播检测完成：检测 " +
+							(d.checked ?? 0) +
+							" 个，可在网页直接播 " +
+							(d.playable ?? 0) +
+							" 个，仅 VLC " +
+							(d.blocked ?? 0) +
+							" 个"
+					: "检测失败: " + (d.msg ?? r.status),
 			);
 			if (r.ok) await load();
 		} finally {
@@ -300,6 +333,9 @@ export default function Admin() {
 							<button className="pill on" onClick={healthCheck} disabled={busy}>
 								{busy ? "处理中…" : "立即体检"}
 							</button>
+							<button className="pill on" onClick={corsCheck} disabled={busy}>
+								{busy ? "处理中…" : "检测网页可播"}
+							</button>
 							{sources.length > 0 && (
 								<button className="pill danger" onClick={clearAll} disabled={busy}>
 									清空全部
@@ -319,6 +355,7 @@ export default function Admin() {
 									<th>名称</th>
 									<th>API</th>
 									<th>评分</th>
+									<th>网页可播</th>
 									<th>状态</th>
 									<th />
 								</tr>
@@ -329,6 +366,7 @@ export default function Admin() {
 										<td>{s.name}</td>
 										<td className="api-cell">{s.api}</td>
 										<td>{s.score != null ? s.score.toFixed(2) : "—"}</td>
+										<td>{s.cors === 1 ? "🌐 可播" : s.cors === 0 ? "📋 仅VLC" : "—"}</td>
 										<td>
 											<button
 												className={

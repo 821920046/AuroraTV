@@ -10,7 +10,7 @@ import {
 	type VideoSource,
 } from "@/lib/sources";
 import { getSourceHealthMap, clearSourceAutoDisabled } from "@/lib/db";
-import { runHealthCheck } from "@/lib/health";
+import { runHealthCheck, runCorsCheck } from "@/lib/health";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +33,7 @@ export async function GET() {
 			auto_disabled: health[s.id]?.auto_disabled ?? 0,
 			fail_streak: health[s.id]?.fail_streak ?? 0,
 			last_ok_at: health[s.id]?.last_ok_at ?? null,
+			cors: health[s.id]?.cors ?? null,
 		})),
 	});
 }
@@ -52,6 +53,10 @@ export async function POST(req: NextRequest) {
 			probes: body.probes,
 			streak: body.streak,
 		});
+		return NextResponse.json({ code: 200, ...result });
+	}
+	if (body.action === "cors_check") {
+		const result = await runCorsCheck(env.AURORA_DB, { limit: body.limit });
 		return NextResponse.json({ code: 200, ...result });
 	}
 	if (!body.name || !body.api)

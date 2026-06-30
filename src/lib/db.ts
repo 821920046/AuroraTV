@@ -7,6 +7,8 @@ export type SourceHealth = {
 	fail_streak?: number;
 	auto_disabled?: number;
 	last_ok_at?: number | null;
+	cors?: number | null; // 1=网页可播（有 ACAO 头） 0=仅 VLC NULL=未检测
+	cors_at?: number | null;
 };
 
 export async function getSourceHealthMap(db: D1Database): Promise<Record<string, SourceHealth>> {
@@ -39,6 +41,23 @@ export async function upsertSourceHealth(db: D1Database, h: SourceHealth): Promi
 			h.auto_disabled ?? 0,
 			h.last_ok_at ?? null,
 		)
+		.run();
+}
+
+// 仅更新「网页可播性」探测结果，不动其它健康字段（避免被体检覆盖）。
+export async function upsertSourceCors(
+	db: D1Database,
+	source_id: string,
+	cors: number | null,
+	cors_at: number,
+): Promise<void> {
+	await db
+		.prepare(
+			`INSERT INTO source_health (source_id, cors, cors_at)
+			 VALUES (?1, ?2, ?3)
+			 ON CONFLICT(source_id) DO UPDATE SET cors=?2, cors_at=?3`,
+		)
+		.bind(source_id, cors, cors_at)
 		.run();
 }
 
