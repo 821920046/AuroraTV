@@ -18,6 +18,8 @@ export default function Home() {
 	const [searched, setSearched] = useState(false);
 	const [playUrl, setPlayUrl] = useState<string | null>(null);
 	const [playSource, setPlaySource] = useState<string | undefined>();
+	const [playMsg, setPlayMsg] = useState("");
+	const [playLoading, setPlayLoading] = useState(false);
 	const [movies, setMovies] = useState<Item[]>([]);
 	const [tv, setTv] = useState<Item[]>([]);
 	const [homeLoading, setHomeLoading] = useState(true);
@@ -56,11 +58,31 @@ export default function Home() {
 	}
 
 	async function play(it: Item) {
-		const r = await fetch("/api/play?source=" + it.source_id + "&id=" + it.vod_id);
-		const data = (await r.json()) as { url?: string };
-		if (data.url) {
+		setPlayLoading(true);
+		setPlayMsg("正在解析播放地址…");
+		setPlayUrl(null);
+		try {
+			const r = await fetch(
+				"/api/play?source=" + encodeURIComponent(it.source_id) + "&id=" + encodeURIComponent(it.vod_id),
+			);
+			const text = await r.text();
+			let data: { url?: string; msg?: string } = {};
+			try {
+				data = text ? (JSON.parse(text) as { url?: string; msg?: string }) : {};
+			} catch {
+				data = { msg: "播放接口返回异常，请重新部署最新版本" };
+			}
+			if (!r.ok || !data.url) {
+				setPlayMsg(data.msg ? "无法播放：" + data.msg : "无法播放：没有可用播放地址");
+				return;
+			}
 			setPlayUrl(data.url);
 			setPlaySource(it.source_id);
+			setPlayMsg("");
+		} catch {
+			setPlayMsg("无法播放：网络请求失败");
+		} finally {
+			setPlayLoading(false);
 		}
 	}
 
@@ -111,6 +133,14 @@ export default function Home() {
 						</button>
 					</div>
 				</section>
+
+				{(playLoading || playMsg) && !playUrl && (
+					<div className="empty">
+						<div className="emoji">{playLoading ? "⏳" : "⚠️"}</div>
+						<h3>{playLoading ? "正在准备播放" : "播放失败"}</h3>
+						<p>{playMsg}</p>
+					</div>
+				)}
 
 				{playUrl && (
 					<div className="player-wrap">

@@ -80,10 +80,13 @@ export async function fetchDetail(
 	sourceId: string,
 	vodId: string,
 ): Promise<Record<string, unknown> | null> {
-	const s = sources.find((x) => x.id === sourceId && x.enabled !== false);
-	if (!s) throw new Error("unknown source");
+	// 调用方会决定传入“启用源”还是“全部源”。这里不要再按 enabled 过滤，
+	// 否则首页/搜索缓存里的结果在片源被体检自动停用后会播放 500。
+	const s = sources.find((x) => x.id === sourceId);
+	if (!s) throw new Error("找不到对应片源，可能已被删除或缓存已过期");
 	const url = `${s.api}?ac=detail&ids=${encodeURIComponent(vodId)}`;
-	const res = await fetchWithTimeout(url, TIMEOUT_MS);
+	// 详情是单个请求（非扣散），超时给到 8 秒，避免慢源 3 秒超时导致播放失败。
+	const res = await fetchWithTimeout(url, 8000);
 	if (!res.ok) throw new Error(`detail ${res.status}`);
 	const data = (await res.json()) as { list?: Array<Record<string, unknown>> };
 	return data?.list?.[0] ?? null;
@@ -284,7 +287,7 @@ export function pickPlayGroup(vodPlayUrl: string, vodPlayFrom?: string): Episode
 		const fromName = fromGroups[i] ?? "";
 		const directCount = eps.filter((e) => isDirectUrl(e.url)).length;
 		let score = directCount / eps.length;
-		if (directCount === 0) score -= 1; // 完全无直链（多为网页/云链接）大幅降权
+		if (directCount === 0) score -= 1; // 完全无直链（多为网页/云链接）大幅降��
 		if (CLOUD_SOURCE_RE.test(fromName)) score -= 1; // 已知云解析源降权
 		if (score > bestScore) {
 			bestScore = score;
