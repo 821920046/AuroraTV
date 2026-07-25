@@ -697,3 +697,124 @@ button:disabled {
 	color: #f59e0b;
 	border-color: rgba(245, 158, 11, 0.4);
 }
+
+/* ==========================================================================
+   升级新增：播放器控件、剧集列表、加载态
+   ========================================================================== */
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px 16px 64px;
+}
+
+.section {
+  margin-top: 32px;
+}
+
+.player-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.08));
+}
+
+.player-frame video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.player-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(7, 11, 20, 0.72);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.player-overlay-text {
+  color: var(--muted, #93a0b8);
+  font-size: 14px;
+}
+
+.player-spinner {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--brand1, #38bdf8);
+  animation: aurora-spin 0.9s linear infinite;
+}
+
+@keyframes aurora-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.player-tap {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 160px;
+  height: 48px;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  font-size: 15px;
+  color: #06121f;
+  background: linear-gradient(90deg, var(--brand1, #38bdf8), var(--brand3, #22d3ee));
+}
+
+.player-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.player-select {
+  background: var(--panel, rgba(255, 255, 255, 0.04));
+  color: var(--text, #e8ecf5);
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.1));
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.player-tag {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.1));
+  color: var(--muted, #93a0b8);
+}
+
+.player-tag-proxy {
+  color: #06121f;
+  border-color: transparent;
+  background: linear-gradient(90deg, var(--brand1, #38bdf8), var(--brand2, #8b5cf6));
+}
+
+.ep-list {
+  max-height: 220px;
+  overflow-y: auto;
+  align-content: flex-start;
+}
+
+.desc {
+  margin-top: 14px;
+  line-height: 1.7;
+}

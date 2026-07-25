@@ -1,54 +1,36 @@
 import type { VideoSource } from "./sources";
 import type { SourceHealth } from "./db";
+import { fetchJson, fetchWithTimeout, parseJsonLoose, upstreamHeaders } from "./http";
 
-const MAX_FANOUT = 6; // ≤ 子请求上限（免费 50），留余量
-const TIMEOUT_MS = 3000;
+// Cloudflare 免费版单请求子请求上限 50。搜索扇出给到 8，剩余额度留给 D1 / 缓存 / 重试。
+const MAX_FANOUT = 8;
+const SEARCH_TIMEOUT_MS = 5000;
+const DETAIL_TIMEOUT_MS = 9000;
 
 export type SearchItem = {
 	source_id: string;
+	source_name?: string;
 	vod_id: string;
 	title: string;
 	poster?: string;
 	year?: number;
 	remarks?: string;
+	type_name?: string;
+	/** 同一部片在其它源上的副本，用于前端「一键换源」 */
+	alts?: Array<{ source_id: string; source_name?: string; vod_id: string }>;
 };
 
 export type Episode = { name: string; url: string };
 
-async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
-	const ctrl = new AbortController();
-	const t = setTimeout(() => ctrl.abort(), ms);
-	try {
-		return await fetch(url, { signal: ctrl.signal });
-	} finally {
-		clearTimeout(t);
-	}
-}
-
-async function fetchJson(url: string): Promise<Record<string, unknown> | null> {
-	try {
-		const res = await fetchWithTimeout(url, TIMEOUT_MS);
-		if (!res.ok) return null;
-		return (await res.json()) as Record<string, unknown>;
-	} catch {
-		return null;
-	}
-}
-
-// 按健康评分（或静态权重）排序，取前 MAX_FANOUT 个源
+// 排序：网页可直连（cors=1）优先 -> 健康评分 -> 静态权重。
+// 注意：自从上了同源代理，cors=0 的源也能播，因此不再「过滤掉」，只做「降权」。
 function pickSources(
 	sources: VideoSource[],
 	health?: Record<string, SourceHealth>,
-	webOnly = false,
+	limit = MAX_FANOUT,
 ): VideoSource[] {
-	let list = sources.filter((s) => s.enabled !== false);
-	// webOnly：仅保留「网页可播」(cors===1) 的源；若一个都没检测出来则退回全部，避免空结果。
-	if (webOnly) {
-		const playable = list.filter((s) => health?.[s.id]?.cors === 1);
-		if (playable.length > 0) list = playable;
-	}
+	const list = sources.filter((s) => s.enabled !== false);
 	list.sort((a, b) => {
-		// 🌐 网页可播优先，其次按健康评分/权重
 		const ca = health?.[a.id]?.cors === 1 ? 1 : 0;
 		const cb = health?.[b.id]?.cors === 1 ? 1 : 0;
 		if (ca !== cb) return cb - ca;
@@ -56,95 +38,15 @@ function pickSources(
 		const sb = health?.[b.id]?.score ?? b.weight ?? 0;
 		return sb - sa;
 	});
-	return list.slice(0, MAX_FANOUT);
+	return list.slice(0, limit);
 }
 
-export async function aggregateSearch(
-	keyword: string,
-	sources: VideoSource[],
-	health?: Record<string, SourceHealth>,
-	webOnly = false,
-): Promise<SearchItem[]> {
-	const picked = pickSources(sources, health, webOnly);
-	const tasks = picked.map(async (s) => {
-		const url = `${s.api}?ac=detail&wd=${encodeURIComponent(keyword)}`;
-		const res = await fetchWithTimeout(url, TIMEOUT_MS);
-		if (!res.ok) throw new Error(`source ${s.id} ${res.status}`);
-		const data = (await res.json()) as { list?: Array<Record<string, unknown>> };
-		const list = data?.list ?? [];
-		return list.map((v) => ({
-			source_id: s.id,
-			vod_id: String(v.vod_id),
-			title: String(v.vod_name ?? ""),
-			poster: v.vod_pic ? String(v.vod_pic) : undefined,
-			year: v.vod_year ? Number(v.vod_year) : undefined,
-			remarks: v.vod_remarks ? String(v.vod_remarks) : undefined,
-		})) as SearchItem[];
-	});
-
-	// 搜索要合并多源，所以收集所有成功结果（而不是只取最快）
-	const settled = await Promise.allSettled(tasks);
-	const merged: SearchItem[] = [];
-	for (const r of settled) if (r.status === "fulfilled") merged.push(...r.value);
-	return dedupe(merged);
-}
-
-export async function fetchDetail(
-	sources: VideoSource[],
-	sourceId: string,
-	vodId: string,
-): Promise<Record<string, unknown> | null> {
-	// 调用方会决定传入“启用源”还是“全部源”。这里不要再按 enabled 过滤，
-	// 否则首页/搜索缓存里的结果在片源被体检自动停用后会播放 500。
-	const s = sources.find((x) => x.id === sourceId);
-	if (!s) throw new Error("找不到对应片源，可能已被删除或缓存已过期");
-	const url = `${s.api}?ac=detail&ids=${encodeURIComponent(vodId)}`;
-	// 详情是单个请求（非扣散），超时给到 8 秒，避免慢源 3 秒超时导致播放失败。
-	const res = await fetchWithTimeout(url, 8000);
-	if (!res.ok) throw new Error(`detail ${res.status}`);
-	const data = (await res.json()) as { list?: Array<Record<string, unknown>> };
-	return data?.list?.[0] ?? null;
-}
-
-// 解析 MacCMS 的 vod_play_url：形如 "第1集$http...m3u8#第2集$http...m3u8"
-// 多个播放组以 $$$ 分隔，这里取第一组。
-export function parsePlayUrl(vodPlayUrl: string): Episode[] {
-	const group = (vodPlayUrl ?? "").split("$$$")[0] ?? "";
-	return group
-		.split("#")
-		.map((seg) => {
-			const [name, url] = seg.split("$");
-			return { name: name ?? "", url: url ?? "" };
-		})
-		.filter((e) => e.url);
-}
-
-function dedupe(items: SearchItem[]): SearchItem[] {
-	const seen = new Set<string>();
-	const out: SearchItem[] = [];
-	for (const it of items) {
-		const k = `${it.title}:${it.year ?? ""}`;
-		if (!seen.has(k)) {
-			seen.add(k);
-			out.push(it);
-		}
-	}
-	return out;
-}
-
-// ---- 首页「近期热播」聚合 ----
-// 为什么不能只拉「最近更新页」：采集站的最近更新几乎都是剧集/动漫（每日更新集数），
-// 电影占比极低，会导致首页只有剧集。因此改为「按类目精准抓取」：
-// 先拉分类表（ac=list 的 class）定位电影/电视剧类目 id，再分别取最新一页（带海报）。
-export type RecentItem = SearchItem & { type_name?: string };
-
-type ClassItem = { type_id: number; type_name: string };
-
-function mapRow(sourceId: string, v: Record<string, unknown>): RecentItem {
+function mapRow(s: VideoSource, v: Record<string, unknown>): SearchItem {
 	return {
-		source_id: sourceId,
-		vod_id: String(v.vod_id),
-		title: String(v.vod_name ?? ""),
+		source_id: s.id,
+		source_name: s.name,
+		vod_id: String(v.vod_id ?? ""),
+		title: String(v.vod_name ?? "").trim(),
 		poster: v.vod_pic ? String(v.vod_pic) : undefined,
 		year: v.vod_year ? Number(v.vod_year) : undefined,
 		remarks: v.vod_remarks ? String(v.vod_remarks) : undefined,
@@ -152,10 +54,97 @@ function mapRow(sourceId: string, v: Record<string, unknown>): RecentItem {
 	};
 }
 
-function asList(data: Record<string, unknown> | null): Array<Record<string, unknown>> {
-	const l = (data as { list?: unknown })?.list;
+function asList(data: unknown): Array<Record<string, unknown>> {
+	const l = (data as { list?: unknown } | null)?.list;
 	return Array.isArray(l) ? (l as Array<Record<string, unknown>>) : [];
 }
+
+/** 归一化标题，用于跨源合并同一部片（去空白 / 括号 / 副标题） */
+function titleKey(it: SearchItem): string {
+	const t = it.title
+		.toLowerCase()
+		.replace(/[\s\u3000]+/g, "")
+		.replace(/[\[\]\uff08\uff09()《》:：\-_.]/g, "");
+	return t + "|" + (it.year ?? "");
+}
+
+/**
+ * 跨源合并：同名同年份的只保留一张卡，但把其它源存进 alts。
+ * 原实现直接丢弃重复项 -> 一旦首选源挂了就彻底无法播放，现在可以自动换源。
+ */
+function mergeByTitle(items: SearchItem[]): SearchItem[] {
+	const map = new Map<string, SearchItem>();
+	for (const it of items) {
+		if (!it.title || !it.vod_id) continue;
+		const k = titleKey(it);
+		const prev = map.get(k);
+		if (!prev) {
+			map.set(k, { ...it, alts: [] });
+			continue;
+		}
+		if (!prev.poster && it.poster) prev.poster = it.poster;
+		if (!prev.remarks && it.remarks) prev.remarks = it.remarks;
+		if (prev.source_id !== it.source_id) {
+			prev.alts = prev.alts ?? [];
+			if (prev.alts.length < 8)
+				prev.alts.push({
+					source_id: it.source_id,
+					source_name: it.source_name,
+					vod_id: it.vod_id,
+				});
+		}
+	}
+	return [...map.values()];
+}
+
+export async function aggregateSearch(
+	keyword: string,
+	sources: VideoSource[],
+	health?: Record<string, SourceHealth>,
+): Promise<SearchItem[]> {
+	const picked = pickSources(sources, health);
+	const tasks = picked.map(async (s) => {
+		const url = `${s.api}?ac=detail&wd=${encodeURIComponent(keyword)}`;
+		const data = await fetchJson(url, { timeoutMs: SEARCH_TIMEOUT_MS, retries: 1 });
+		return asList(data).map((v) => mapRow(s, v));
+	});
+
+	const settled = await Promise.allSettled(tasks);
+	const merged: SearchItem[] = [];
+	for (const r of settled) if (r.status === "fulfilled") merged.push(...r.value);
+
+	// 健康度高的源排前，合并时就会被选为主源
+	const order = new Map(picked.map((s, i) => [s.id, i]));
+	merged.sort((a, b) => (order.get(a.source_id) ?? 99) - (order.get(b.source_id) ?? 99));
+	return mergeByTitle(merged);
+}
+
+export async function fetchDetail(
+	sources: VideoSource[],
+	sourceId: string,
+	vodId: string,
+): Promise<Record<string, unknown> | null> {
+	const s = sources.find((x) => x.id === sourceId);
+	if (!s) throw new Error("找不到对应片源，可能已被删除或缓存已过期");
+	const url = `${s.api}?ac=detail&ids=${encodeURIComponent(vodId)}`;
+	const res = await fetchWithTimeout(url, {
+		timeoutMs: DETAIL_TIMEOUT_MS,
+		retries: 1,
+		headers: upstreamHeaders(url),
+	});
+	if (!res.ok) throw new Error(`片源返回 ${res.status}`);
+	const data = parseJsonLoose<{ list?: Array<Record<string, unknown>> }>(await res.text());
+	return data?.list?.[0] ?? null;
+}
+
+export function parsePlayUrl(vodPlayUrl: string): Episode[] {
+	return parseGroup((vodPlayUrl ?? "").split("$$$")[0] ?? "");
+}
+
+// ---- 首页「近期热播」聚合 ----
+export type RecentItem = SearchItem;
+
+type ClassItem = { type_id: number; type_name: string };
 
 function isTvName(n: string): boolean {
 	return /剧|电视|连续/.test(n);
@@ -165,13 +154,12 @@ function isMovieName(n: string): boolean {
 	return /电影|影片|片/.test(n) && !/动漫|动画|综艺/.test(n);
 }
 
-// 从 MacCMS 的 class 分类表里挑出电影 / 电视剧类目 id
 function pickCategoryIds(classes: ClassItem[]): { movieIds: number[]; tvIds: number[] } {
 	const movieIds: number[] = [];
 	const tvIds: number[] = [];
 	for (const c of classes) {
 		const n = c.type_name ?? "";
-		if (Number.isNaN(c.type_id)) continue;
+		if (!Number.isFinite(c.type_id)) continue;
 		if (isTvName(n)) tvIds.push(c.type_id);
 		else if (isMovieName(n)) movieIds.push(c.type_id);
 	}
@@ -185,29 +173,13 @@ function byRecency(a: RecentItem, b: RecentItem): number {
 	return (b.year ?? 0) - (a.year ?? 0);
 }
 
-function dedupeRecent(items: RecentItem[]): RecentItem[] {
-	const seen = new Set<string>();
+async function fetchCategory(s: VideoSource, ids: number[]): Promise<RecentItem[]> {
 	const out: RecentItem[] = [];
-	for (const it of items) {
-		if (!it.title) continue;
-		const k = `${it.title}:${it.year ?? ""}`;
-		if (!seen.has(k)) {
-			seen.add(k);
-			out.push(it);
-		}
-	}
-	return out;
-}
-
-async function fetchCategory(
-	s: VideoSource,
-	ids: number[],
-): Promise<RecentItem[]> {
-	const out: RecentItem[] = [];
-	// 取前两个匹配类目（如「电影」与某热门子类），控制子请求数
 	for (const id of ids.slice(0, 2)) {
-		const data = await fetchJson(`${s.api}?ac=detail&t=${id}&pg=1`);
-		for (const v of asList(data)) out.push(mapRow(s.id, v));
+		const data = await fetchJson(`${s.api}?ac=detail&t=${id}&pg=1`, {
+			timeoutMs: SEARCH_TIMEOUT_MS,
+		});
+		for (const v of asList(data)) out.push(mapRow(s, v));
 	}
 	return out;
 }
@@ -216,16 +188,14 @@ export async function aggregateRecent(
 	sources: VideoSource[],
 	health?: Record<string, SourceHealth>,
 	maxSources = 4,
-	webOnly = false,
 ): Promise<{ movies: RecentItem[]; tv: RecentItem[] }> {
-	const picked = pickSources(sources, health, webOnly).slice(0, maxSources);
+	const picked = pickSources(sources, health, maxSources);
 	const tasks = picked.map(async (s) => {
 		const movies: RecentItem[] = [];
 		const tv: RecentItem[] = [];
 
-		// 1) 拉分类表，定位「电影」「电视剧」类目 id
-		const listData = await fetchJson(`${s.api}?ac=list`);
-		const rawClass = Array.isArray((listData as { class?: unknown })?.class)
+		const listData = await fetchJson(`${s.api}?ac=list`, { timeoutMs: SEARCH_TIMEOUT_MS });
+		const rawClass = Array.isArray((listData as { class?: unknown } | null)?.class)
 			? (listData as { class: Array<Record<string, unknown>> }).class
 			: [];
 		const classes: ClassItem[] = rawClass.map((c) => ({
@@ -234,7 +204,6 @@ export async function aggregateRecent(
 		}));
 		const { movieIds, tvIds } = pickCategoryIds(classes);
 
-		// 2) 按类目分别取最新一页（带 vod_pic 海报）
 		const [m, t] = await Promise.all([
 			movieIds.length ? fetchCategory(s, movieIds) : Promise.resolve([] as RecentItem[]),
 			tvIds.length ? fetchCategory(s, tvIds) : Promise.resolve([] as RecentItem[]),
@@ -242,11 +211,10 @@ export async function aggregateRecent(
 		movies.push(...m);
 		tv.push(...t);
 
-		// 3) 兜底：分类识别失败时，退回混合最新页并按名称归类
 		if (movies.length === 0 && tv.length === 0) {
-			const mixed = await fetchJson(`${s.api}?ac=detail&pg=1`);
+			const mixed = await fetchJson(`${s.api}?ac=detail&pg=1`, { timeoutMs: SEARCH_TIMEOUT_MS });
 			for (const v of asList(mixed)) {
-				const item = mapRow(s.id, v);
+				const item = mapRow(s, v);
 				const tn = item.type_name ?? "";
 				if (isTvName(tn)) tv.push(item);
 				else if (isMovieName(tn)) movies.push(item);
@@ -265,32 +233,39 @@ export async function aggregateRecent(
 		}
 	}
 	return {
-		movies: dedupeRecent(allMovies).sort(byRecency),
-		tv: dedupeRecent(allTv).sort(byRecency),
+		movies: mergeByTitle(allMovies).sort(byRecency),
+		tv: mergeByTitle(allTv).sort(byRecency),
 	};
 }
 
-// ---- 点播取流：智能挑选可直连的播放组 ----
-// MacCMS 的 vod_play_url 常有多组（$$$ 分隔），与 vod_play_from 一一对应。
-// 很多源第一组是 qq/爱奇艺/优酷等需要解析的云链接（非直链），
-// 直接取第一组会导致“全部无法播放”。这里挑选直链占比最高、且非云解析源的播放组。
+// ---- 取流：智能挑选可直连的播放组 ----
 const CLOUD_SOURCE_RE =
-	/qq|qiyi|iqiyi|youku|优酷|腾讯|爱奇艺|mgtv|芒果|letv|乐视|sohu|搜狐|pptv|bilibili|哔哩|xigua|网盘|magnet|百度|ed2k/i;
+	/qq|qiyi|iqiyi|youku|优酷|腾讯|爱奇艺|mgtv|芒果|letv|乐视|sohu|搜狐|pptv|bilibili|哔哩|xigua|网盘|magnet|百度|ed2k|网页|内置/i;
 
 function isDirectUrl(u: string): boolean {
-	return /\.m3u8|\.mp4|\.flv|\.ts(\?|$)/i.test(u);
+	return /\.m3u8|\.mp4|\.flv|\.ts($|[?#])/i.test(u);
+}
+
+function isHlsUrl(u: string): boolean {
+	return /\.m3u8($|[?#])/i.test(u);
 }
 
 function parseGroup(group: string): Episode[] {
 	return (group ?? "")
 		.split("#")
 		.map((seg) => {
-			const [name, url] = seg.split("$");
-			return { name: name ?? "", url: url ?? "" };
+			const idx = seg.indexOf("$");
+			if (idx < 0) return { name: "", url: seg.trim() };
+			return { name: seg.slice(0, idx).trim(), url: seg.slice(idx + 1).trim() };
 		})
-		.filter((e) => e.url);
+		.filter((e) => /^https?:\/\//i.test(e.url));
 }
 
+/**
+ * 挑选最佳播放组。
+ * 修正点：原实现用 seg.split("$") 解构，地址里带 $ 的会被截断；
+ * 且未优先 HLS。现在：HLS 加分、直链占比加分、云解析源降分、集数多略加分。
+ */
 export function pickPlayGroup(vodPlayUrl: string, vodPlayFrom?: string): Episode[] {
 	const urlGroups = (vodPlayUrl ?? "").split("$$$");
 	const fromGroups = (vodPlayFrom ?? "").split("$$$");
@@ -300,16 +275,33 @@ export function pickPlayGroup(vodPlayUrl: string, vodPlayFrom?: string): Episode
 		const eps = parseGroup(urlGroups[i]);
 		if (eps.length === 0) continue;
 		const fromName = fromGroups[i] ?? "";
-		const directCount = eps.filter((e) => isDirectUrl(e.url)).length;
-		let score = directCount / eps.length;
-		if (directCount === 0) score -= 1; // 完全无直链（多为网页/云链接）大幅降��
-		if (CLOUD_SOURCE_RE.test(fromName)) score -= 1; // 已知云解析源降权
+		const directRatio = eps.filter((e) => isDirectUrl(e.url)).length / eps.length;
+		const hlsRatio = eps.filter((e) => isHlsUrl(e.url)).length / eps.length;
+		let score = directRatio + hlsRatio * 0.5;
+		if (directRatio === 0) score -= 2;
+		if (CLOUD_SOURCE_RE.test(fromName)) score -= 1.5;
+		score += Math.min(eps.length, 100) / 1000; // 集数更全的微幅加分
 		if (score > bestScore) {
 			bestScore = score;
 			best = eps;
 		}
 	}
-	// 全都没有直链时，退回第一组
 	if (best.length === 0 && urlGroups.length > 0) best = parseGroup(urlGroups[0]);
 	return best;
+}
+
+/** 把所有播放组都解出来，供前端「换线路」使用。 */
+export function parseAllGroups(
+	vodPlayUrl: string,
+	vodPlayFrom?: string,
+): Array<{ from: string; episodes: Episode[] }> {
+	const urlGroups = (vodPlayUrl ?? "").split("$$$");
+	const fromGroups = (vodPlayFrom ?? "").split("$$$");
+	const out: Array<{ from: string; episodes: Episode[] }> = [];
+	for (let i = 0; i < urlGroups.length; i++) {
+		const eps = parseGroup(urlGroups[i]);
+		if (eps.length === 0) continue;
+		out.push({ from: (fromGroups[i] ?? `线路${i + 1}`).trim() || `线路${i + 1}`, episodes: eps });
+	}
+	return out;
 }
