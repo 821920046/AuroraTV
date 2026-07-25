@@ -8,10 +8,28 @@ export const BROWSER_UA =
 export const MOBILE_UA =
 	"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 
-/** 给上游请求配一套「看起来像浏览器」的头，并用对方自己的域名做 Referer 绕过常见防盗链。 */
+/**
+ * 给上游请求配一套「看起来像浏览器」的头，并用对方自己的域名做 Referer 绕过常见防盗链。
+ *
+ * 【重要教训】这里曾经额外发过 `Origin` 头 —— 那是个严重错误：
+ * 真实浏览器在拉 <video>/<img>/分片这类简单 GET 时【从不】发送 Origin，
+ * 只有 CORS 请求才会带。给采集站 CDN 发 Origin，等于自报「我是脚本」，
+ * 大量 WAF / 防盗链会直接判定为异常流量返回 403/5xx，
+ * 表现就是 /api/stream 一律 502。已移除。
+ *
+ * @param variant 请求头策略：用于在 403 时逐级降级重试
+ *  - "browser"：桌面 UA + 同站 Referer（默认，绕过绝大多数 Referer 防盗链）
+ *  - "noreferer"：桌面 UA，不带 Referer（部分 CDN 反而拒绝带 Referer 的请求）
+ *  - "mobile"：移动端 UA，不带 Referer（部分源只放行手机客户端）
+ */
+export type HeaderVariant = "browser" | "noreferer" | "mobile";
+
+export const HEADER_LADDER: HeaderVariant[] = ["browser", "noreferer", "mobile"];
+
 export function upstreamHeaders(
 	targetUrl: string,
 	extra?: Record<string, string>,
+	variant: HeaderVariant = "browser",
 ): Record<string, string> {
 	let origin = "";
 	try {
@@ -20,14 +38,12 @@ export function upstreamHeaders(
 		/* ignore */
 	}
 	const h: Record<string, string> = {
-		"user-agent": BROWSER_UA,
+		"user-agent": variant === "mobile" ? MOBILE_UA : BROWSER_UA,
 		accept: "*/*",
 		"accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
 	};
-	if (origin) {
-		h.referer = origin + "/";
-		h.origin = origin;
-	}
+	// 只有 browser 策略带 Referer；且绝不发送 Origin。
+	if (origin && variant === "browser") h.referer = origin + "/";
 	return { ...h, ...(extra ?? {}) };
 }
 

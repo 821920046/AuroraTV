@@ -66,7 +66,9 @@ export async function GET(req: NextRequest) {
 			source_id: sourceId,
 			source_name: sources.find((s) => s.id === sourceId)?.name ?? sourceId,
 			title: String(detail.vod_name ?? ""),
-			pic: detail.vod_pic ? String(detail.vod_pic) : null,
+			// 海报必须走代理：它会被用作 <video poster>，而采集站图床既可能是 http（混合内容）
+			// 又没有 CORS 头（被当作跨域图片拒绝）。
+			pic: detail.vod_pic ? await minter.imageUrl(String(detail.vod_pic)) : null,
 			desc: String(detail.vod_content ?? "")
 				.replace(/<[^>]+>/g, "")
 				.slice(0, 400),

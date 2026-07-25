@@ -468,7 +468,9 @@ export default function Player(props: PlayerProps) {
 					controls
 					playsInline
 					preload="metadata"
-					crossOrigin={current.mode === "proxy" ? "anonymous" : undefined}
+					/* 不要设 crossOrigin：<video> 一旦带上它，poster 图片也会变成 CORS 请求，
+					   采集站图床没有 ACAO 头就直接被拒（控制台里那一堆 pic.*.com 报错）。
+					   hls.js 是自己发 XHR 拉分片的，不依赖 video 元素的 crossOrigin。 */
 					style={{ width: "100%", height: "100%", background: "#000" }}
 				/>
 
