@@ -1,3 +1,166 @@
+# AuroraTV 升级说明（v0.4.0）
+
+> 本版是 v0.3.0 之后的一轮对抗审查结果。v0.3.0 见本文档第二节，v0.2.0 见下半部分。
+
+## 零、【最严重】上一轮的 CI 其实是失败的 —— 锁文件不跨平台
+
+v0.3.0 我加了 `verify`（typecheck/test/lint）+ `deploy` 两阶段 CI，并报告「已推送、已验证」。
+**但那次 CI 的 `deploy` 作业是失败的**（run `37763591289`）：
+
+```
+verify  ✓ 34s
+deploy  ✗ 27s
+  Error: Cannot find native binding. npm has a bug related to optional dependencies
+         (https://github.com/npm/cli/issues/4828)
+  Error: Cannot find module '@ast-grep/napi-linux-x64-gnu'
+```
+
+**根因**：`package-lock.json` 是在 **Windows** 上生成的，而 npm 会把「`os`/`cpu` 与当前平台
+不匹配」的可选依赖**从锁文件里裁掉**。于是锁文件里只有：
+
+| 包 | 锁文件里有的平台 | 缺的 |
+| --- | --- | --- |
+| `@ast-grep/napi`（OpenNext 用它改写产物） | `win32-x64-msvc` | 其余 8 个，含 `linux-x64-gnu` |
+| `@next/swc` | `win32-x64-msvc` | 其余 7 个，含 `linux-x64-gnu` |
+| `@img/sharp` | `win32-x64` | 其余 |
+
+CI 跑在 `ubuntu-latest` 且用 `npm ci`，而 `npm ci` **只装锁文件里有的东西**，
+于是 Linux 原生二进制一个都没装，`opennextjs-cloudflare build` 在加载
+`@ast-grep/napi` 时直接抛 `MODULE_NOT_FOUND`。
+
+**为什么 `verify` 却是绿的**：typecheck / test / lint 都不需要原生二进制，
+只有真正要产出部署包的 `deploy` 才需要 —— 失败被两个作业的边界挡住了。
+这也是「加了 CI 闸门」反而掩盖问题的一次典型：**闸门只保护它覆盖到的那部分**。
+
+**修复**：把 CI 必需的原生二进制提升为**根级 `optionalDependencies`**：
+
+```json
+"optionalDependencies": {
+  "@ast-grep/napi-linux-arm64-gnu": "0.40.5",
+  "@ast-grep/napi-linux-x64-gnu": "0.40.5",
+  "@next/swc-linux-arm64-gnu": "15.5.27",
+  "@next/swc-linux-x64-gnu": "15.5.27"
+}
+```
+
+根级声明的可选依赖会被完整写进锁文件，而 `os`/`cpu` 门控保证**各平台只装自己那一份**
+（Linux 装 linux，Windows 装 win32，互不干扰）。这是 npm/cli#4828 的标准绕法，
+比「把 `npm ci` 换成 `npm install`」更好：**保住了锁文件的确定性**。
+
+> 版本号需要与 `next` / `@ast-grep/napi` 保持同步，升级这两个依赖时要一并改。
+> 已在 `UPGRADE.md` 与 `README.md` 中标注。
+
+**验证**：改动后锁文件只新增这 4 条、无任何删除；`npm ci --dry-run` 通过（锁文件与
+`package.json` 同步）。
+
+## 一、SSRF 只修了一半：`/api/img` 漏网
+
+v0.3.0 修好了 `/api/stream` 的重定向绕过，**但 `/api/img` 还在用 `redirect: "follow"`**。
+同一个漏洞、同一个成因，只是换了个文件：
+
+```ts
+upstream = await fetch(target, { headers: ..., redirect: "follow" });  // ← 旧代码
+```
+
+海报地址来自第三方采集接口的 `vod_pic` 字段，签名的确是合法的 —— 但只要那个图床 302 到
+`http://169.254.169.254/latest/meta-data/`，校验就形同虚设。
+
+**修复**：把守卫取流从 `stream/route.ts` 抽成 `proxy.ts` 里的 `guardedFetch()`，
+两处共用。**只修一个调用点、不抽公共实现，正是这次漏网的根因** —— 所以这次直接消除重复。
+
+## 二、`isSafeUpstream()` 的 IPv6 绕过
+
+旧实现是**字符串前缀比对**：
+
+```ts
+if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return false;
+```
+
+而 WHATWG URL 解析器会把 `http://[::ffff:127.0.0.1]/` **规范化**成 `[::ffff:7f00:1]` ——
+三个分支一个都不命中，于是**回环地址被判定为安全**。这是一条完整的 SSRF 通路，
+而且它连重定向都不需要，直接把内网地址塞进 `u` 参数即可。
+
+**修复**：改为**按位解析** IPv6（展开 `::` 得到 8 个 16 位分组），再按网段判断。
+现在能拦下 IPv4 映射/兼容地址（`::ffff:7f00:1`、`::7f00:1`）、`::`、组播 `ff00::/8`、
+NAT64 `64:ff9b::/96`、Teredo `2001::/32`、6to4 `2002::/16` 里内嵌的内网 v4，
+以及带 zone id 的链路本地地址。**解析失败一律视为危险**（fail-closed）。
+
+## 三、`/api/img` 无体积上限，等于开放图床
+
+海报 URL 来自第三方接口。上游被投毒或返回一个超大「图片」时，旧实现会把整个响应体
+**原样回传并写进边缘缓存**，等于给攻击者一个免费 CDN。
+
+**修复**：8MB 上限，两道闸门 ——
+1. `content-length` 预检，超限直接 413，连流都不开；
+2. `TransformStream` 逐块计数兜底（分块传输根本不带 `content-length`，只靠预检拦不住）。
+
+> 预检这里有个坑：写成 `Number.isFinite(n) && n > MAX` 的话，伪造 `Content-Length: 1e999`
+> 会得到 `Infinity`，被 `isFinite` 判为「非法头」从而**跳过预检**。改成直接比较大小。
+
+## 四、`/api/img` 盲传 `content-length` 会把图片截断
+
+旧代码把上游的 `content-length` 直接透传。但 Cloudflare Workers 的 `fetch` 会
+**自动解压 gzip/br 并移除 `content-encoding`**，而 `content-length` 仍是**压缩前**的长度。
+浏览器按旧长度读取 → 图片裂一半。
+
+**修复**：不再透传 `content-length`，交给运行时按实际字节决定（分块传输没有任何副作用）。
+
+## 五、搜索缓存不随片源集合失效
+
+缓存键是 `makeCacheKey("search", kw, { v: 2 })` —— 只有一个人工维护的版本号。
+站长导入 / 删除 / 启停片源后，用户仍会命中 **30 分钟前**的旧结果，
+表现为「后台明明加了源，前台却搜不到」。
+
+**修复**：缓存键加入**启用片源集合的指纹**（排序后的 `id:weight` 拼接）。
+集合一变键就变，不需要人工改版本号。
+
+## 六、`Player`：「重试」按钮在 hls.js 路径下是空操作
+
+失败后点「重试」不生效。原因有两层：
+
+1. `retry()` 只做了 `setCandIdx(0)`，而 `candIdx` **本来就是 0** → React 不重渲染 → 挂载媒体的 effect 不重跑；
+2. HLS 走的是 `hls.js` 分支，**从不设置 `video.src`**，所以那个「手动设 src」的兜底代码对它完全无效。
+
+**修复**：新增 `reloadKey` 并加入 effect 依赖，每次重试强制重挂媒体，两条路径都能真正重试。
+
+## 七、手动换线路被算进了片源健康评分
+
+`switchLine()` 里写 `reportedRef.current = true` 想表达「手动换线不计入统计」，
+但这个 ref 在挂载 effect 里会被立刻重置为 `false` —— 意图失效，
+用户手动切到一条更差的线路并播放成功，会**抬高那个源的健康评分**。
+
+**修复**：改用独立的 `manualRef`，由挂载 effect 读取后清除，跨渲染周期生效。
+
+## 八、验证结果
+
+| 闸门 | 结果 |
+| --- | --- |
+| `npm ci --dry-run`（锁文件与 `package.json` 同步） | ✅ 通过 |
+| `npm run typecheck` | ✅ 无错误 |
+| `npm test` | ✅ 36/36 通过（v0.3.0 为 22 项） |
+| `npm run lint` | ✅ 0 error / 0 warning |
+| `next build` | ✅ 编译成功，9/9 静态页生成 |
+| `opennextjs-cloudflare build` | ✅ 产出 `.open-next/worker.js` + 完整 bundle |
+
+部署产物已用「在本轮新代码里独有的字符串」反向核对（`blocked redirect target`、
+`image too large`、`img proxy rejected`、`too many redirects`），确认 bundle 里跑的
+确实是当前源码，而不是旧产物。
+
+> **构建环境备注（仅本地，与 CI 无关）**：在 Windows + 受限沙箱下 `next build`
+> 会在 `.next` 的清理与 `trace` 文件创建上被拦（`SAFE_DELETE_BULK_CONFIRM_REQUIRED` /
+> `EPERM`）。绕过方式是先 `mkdir -p .next && : > .next/trace` 再构建。
+> CI（`ubuntu-latest`）无此问题。
+
+新增的 14 项单测集中在两处**安全核心**：
+
+- **IPv6 地址矩阵**：IPv4 映射/兼容回环、`::`、组播、NAT64、Teredo、6to4 内嵌内网，
+  同时断言公网 IPv6 与「映射的是公网 v4」必须放行（防止把防护写成误杀）。
+- **`guardedFetch` 重定向逐跳校验**：注入假 fetch，断言「危险地址**一次都不会被真正请求**」
+  （只断言返回错误是不够的 —— 必须证明请求没发出去），以及相对 Location、跳数上限、
+  缺 Location、按跳重建请求头、`opaqueredirect` 兜底。
+
+---
+
 # AuroraTV 升级说明（v0.3.0）
 
 > v0.2.0 的流代理升级见本文档下半部分。以下为 v0.3.0 的修复。

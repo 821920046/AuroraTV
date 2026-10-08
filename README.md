@@ -98,6 +98,16 @@ npm run cf:deploy
 或推送到 `main`，由 GitHub Actions 先跑 `typecheck` + `test` + `lint`，全绿后才构建部署。
 需在仓库 Settings → Secrets 配置 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`。
 
+> **⚠️ 改依赖后请留意 `package.json` 的 `optionalDependencies`**
+>
+> 里面钉着 CI 必需的原生二进制（`@next/swc-linux-*`、`@ast-grep/napi-linux-*`）。
+> 原因：npm 会把 `os`/`cpu` 不匹配当前平台的可选依赖**从锁文件里裁掉**
+> （[npm/cli#4828](https://github.com/npm/cli/issues/4828)），在 Windows 上生成的锁文件
+> 因此不含 Linux 二进制，而 CI 跑在 `ubuntu-latest` 且用 `npm ci` —— 只装锁文件里有的东西，
+> 于是 `opennextjs-cloudflare build` 会以 `Cannot find module '@ast-grep/napi-linux-x64-gnu'` 失败。
+> 提升为根级 `optionalDependencies` 后会被完整写进锁文件，`os`/`cpu` 门控保证各平台只装自己那份。
+> **升级 `next` 或 `@opennextjs/cloudflare` 时，记得同步这里的版本号。**
+
 ### 7. 设置密钥
 
 ```bash
@@ -139,8 +149,14 @@ npx wrangler deploy
 - **流代理不开放**：每个代理地址都是 `exp.前缀.HMAC-SHA256`，签名绑定 URL 前缀与过期时间（默认 12h），
   因此一条 500 片的播放列表只需签一次；前缀不匹配 / 过期 / 篡改一律拒绝。
 - **SSRF 防护**：只允许公网 http(s)，拒绝回环、私网、CGNAT、链路本地、云元数据地址。
+  IPv6 按位解析而非字符串前缀比对——`http://[::ffff:127.0.0.1]/` 会被 URL 解析器规范化成
+  `[::ffff:7f00:1]`，只比对 `::1` 的写法会直接漏掉它。
   取流时**手动跟随重定向并逐跳重新校验**——用 `redirect: "follow"` 的话，
   一个合法公网地址 302 到 `169.254.169.254` 就能绕过全部校验。
+  `/api/stream` 与 `/api/img` 共用同一个 `guardedFetch()`，不存在「修了一个漏了另一个」。
+- **图片代理有体积上限**（8MB）：海报地址来自第三方接口，不限体积等于开放图床。
+  同时不透传上游 `content-length`——Workers 会自动解压并移除 `content-encoding`，
+  长度对不上会让浏览器把图片截断。
 - **口令比较定长**：Basic Auth 与 `CRON_SECRET` 均使用定长比较，避免时序侧信道。
 - **安全响应头**：`x-content-type-options` / `referrer-policy` / `x-frame-options` / `permissions-policy`。
 
@@ -150,7 +166,9 @@ npx wrangler deploy
 2. **`/api/cron/*` 仍兼容 `?secret=`**（为了不破坏已有部署），但该方式会把密钥写进访问日志，新部署请用 `Authorization: Bearer`。
 3. **代理签名在有效期内可重放**。缩短 `DEFAULT_TOKEN_TTL` 可降低风险，代价是长剧连播中途需重新取地址。
 4. **DRM / 地区封锁的流仍播不了**——属上游策略问题，任何代理都无法解决。
-5. **SSRF 黑名单基于字面地址**，未做 DNS 预解析；配合逐跳重定向校验已覆盖常见绕过路径，但不等价于完整防护。
+5. **SSRF 黑名单基于字面地址**，未做 DNS 预解析。逐跳重定向校验 + IPv6 按位判定已覆盖常见绕过路径
+   （含 `::ffff:` 映射回环、NAT64、Teredo、6to4），但不等价于完整防护——若上游域名解析到内网，
+   本层拦不住。生产部署建议再配 Cloudflare 的 egress 策略。
 6. **中转视频流的合规风险**：Cloudflare 服务条款 2.8 对大量中转非 HTML 内容（尤其视频）有限制。
    自用请设好 `USERNAME`/`PASSWORD`/`STREAM_SECRET`，并控制使用规模。
 

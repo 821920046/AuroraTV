@@ -1,5 +1,5 @@
 // ============================================================================
-// 同源流媒体代理：签名 / 校验 / 播放列表改写
+// 同源流媒体代理：签名 / 校验 / 播放列表改写 / 守卫取流
 // ----------------------------------------------------------------------------
 // 【为什么必须有这一层 —— 第一性原理】
 // 浏览器播放 HLS 的硬性前提有三条，缺一不可：
@@ -101,6 +101,86 @@ function safeEqual(a: string, b: string): boolean {
 // ---------------------------------------------------------------- SSRF 防护
 
 /**
+ * IPv4 是否属于「公网可路由」。
+ * 与 WHATWG URL 解析器配合：`http://0x7f000001/`、`http://2130706433/`、
+ * `http://0177.0.0.1/` 这类八进制/十六进制/整数写法都会被规范化成点分十进制，
+ * 因此这里只需处理点分十进制。
+ */
+function isPublicIpv4(a: number, b: number): boolean {
+	if (a === 0 || a === 10 || a === 127) return false; // 未指定 / 私网 / 回环
+	if (a === 169 && b === 254) return false; // 链路本地，含云元数据 169.254.169.254
+	if (a === 172 && b >= 16 && b <= 31) return false; // 私网
+	if (a === 192 && b === 168) return false; // 私网
+	if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
+	if (a === 192 && b === 0) return false; // 192.0.0.0/24 协议保留
+	if (a === 198 && (b === 18 || b === 19)) return false; // 基准测试
+	if (a >= 224) return false; // 组播 / 保留 / 广播
+	return true;
+}
+
+/**
+ * 把 IPv6 字面量（不含方括号）解析成 8 个 16 位分组。
+ *
+ * 【为什么必须按位解析，而不是正则匹配字符串】
+ * `http://[::ffff:127.0.0.1]/` 会被 WHATWG URL 解析器规范化成 `[::ffff:7f00:1]`。
+ * 旧实现只比对 `::1` / `fc00::/7` / `fe80::` 三个字符串前缀，
+ * `::ffff:7f00:1` 一个都不命中 —— 于是「回环地址」被判定为安全，
+ * 重定向到内网也就绕过了整层 SSRF 防护。按位展开后这类地址无从隐藏。
+ */
+function parseIpv6(host: string): number[] | null {
+	const h = host.split("%")[0]; // 去掉 zone id（fe80::1%eth0）
+	const halves = h.split("::");
+	if (halves.length > 2) return null;
+
+	const parseParts = (parts: string[]): number[] | null => {
+		const out: number[] = [];
+		for (const p of parts) {
+			if (/^\d{1,3}(\.\d{1,3}){3}$/.test(p)) {
+				// 尾部内嵌的 IPv4（::ffff:127.0.0.1）
+				const v4 = p.split(".").map(Number);
+				if (v4.some((n) => n > 255)) return null;
+				out.push(((v4[0] << 8) | v4[1]) & 0xffff, ((v4[2] << 8) | v4[3]) & 0xffff);
+				continue;
+			}
+			if (!/^[0-9a-f]{1,4}$/.test(p)) return null;
+			out.push(parseInt(p, 16));
+		}
+		return out;
+	};
+
+	const head = parseParts(halves[0] ? halves[0].split(":") : []);
+	const tail = parseParts(halves.length === 2 && halves[1] ? halves[1].split(":") : []);
+	if (!head || !tail) return null;
+	if (halves.length === 1) return head.length === 8 ? head : null;
+	const fill = 8 - head.length - tail.length;
+	if (fill < 0) return null;
+	return [...head, ...new Array<number>(fill).fill(0), ...tail];
+}
+
+/** IPv6 是否属于「不可路由到公网」的地址段。解析失败一律视为危险。 */
+function isBlockedIpv6(host: string): boolean {
+	const g = parseIpv6(host);
+	if (!g) return true;
+	const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
+
+	if (zero(0, 8)) return true; // :: 未指定
+	if (zero(0, 7) && g[7] === 1) return true; // ::1 回环
+	// IPv4 映射 ::ffff:0:0/96 与 IPv4 兼容 ::/96（已废弃）—— 一律由内嵌的 v4 决定。
+	// `::` 与 `::1` 已在上面被拦截，不会走到这里。
+	// 内嵌 v4 的前两段落在 g[6]：高字节 = 第一段，低字节 = 第二段。
+	if (zero(0, 5) && (g[5] === 0xffff || g[5] === 0)) {
+		return !isPublicIpv4(g[6] >> 8, g[6] & 0xff);
+	}
+	if ((g[0] & 0xfe00) === 0xfc00) return true; // ULA fc00::/7
+	if ((g[0] & 0xffc0) === 0xfe80) return true; // 链路本地 fe80::/10
+	if ((g[0] & 0xff00) === 0xff00) return true; // 组播 ff00::/8
+	if (g[0] === 0x64 && g[1] === 0xff9b) return true; // NAT64 64:ff9b::/96
+	if (g[0] === 0x2001 && g[1] === 0x0000) return true; // Teredo 2001::/32
+	if (g[0] === 0x2002) return !isPublicIpv4(g[1] >> 8, g[1] & 0xff); // 6to4 内嵌 v4
+	return false;
+}
+
+/**
  * 只允许公网 http(s)。内网 / 回环 / 链路本地 / 云元数据地址一律拒绝，
  * 避免代理被用来探测 Cloudflare 内部或用户自建网络。
  */
@@ -123,21 +203,123 @@ export function isSafeUpstream(raw: string): boolean {
 		host === "metadata.google.internal"
 	)
 		return false;
-	// IPv6 回环 / ULA / 链路本地
-	if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return false;
+
+	// 含冒号 => IPv6 字面量（主机名不允许出现冒号），交给按位解析
+	if (host.includes(":")) return !isBlockedIpv6(host);
 
 	const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
 	if (m) {
-		const a = Number(m[1]);
-		const b = Number(m[2]);
-		if (a === 0 || a === 10 || a === 127) return false;
-		if (a === 169 && b === 254) return false; // 链路本地 / 云元数据
-		if (a === 172 && b >= 16 && b <= 31) return false;
-		if (a === 192 && b === 168) return false;
-		if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
-		if (a >= 224) return false; // 组播 / 保留
+		const octets = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+		if (octets.some((n) => n > 255)) return false;
+		return isPublicIpv4(octets[0], octets[1]);
 	}
 	return true;
+}
+
+// ---------------------------------------------------------------- 守卫取流
+
+/** 最多跟随多少跳重定向 */
+export const MAX_REDIRECTS = 3;
+
+export type GuardedFetchOptions = {
+	method?: "GET" | "HEAD";
+	/**
+	 * 请求头。允许传函数 —— Referer 必须按「当前这一跳」的域名重新生成，
+	 * 跳转后仍带旧域名的 Referer 会被源站拒掉。
+	 */
+	headers?: Record<string, string> | ((url: string) => Record<string, string>);
+	/** Cloudflare 边缘缓存选项，逐跳透传给子请求 */
+	cf?: Record<string, unknown>;
+	/** 便于单测注入；生产环境用全局 fetch */
+	fetcher?: typeof fetch;
+};
+
+export type GuardedFetchResult =
+	| { ok: true; res: Response; finalUrl: string }
+	| { ok: false; error: string };
+
+export function hostOf(raw: string): string {
+	try {
+		return new URL(raw).host;
+	} catch {
+		return "invalid-url";
+	}
+}
+
+async function cancelBody(res: Response): Promise<void> {
+	try {
+		await res.body?.cancel();
+	} catch {
+		/* ignore */
+	}
+}
+
+/**
+ * 带 SSRF 防护的取流：手动跟随重定向，**每一跳都重新做地址校验**。
+ *
+ * 【为什么必须手动跟随】
+ * 签名只绑定「发起请求的那个 URL」。若用 `redirect: "follow"`，一个通过校验的
+ * 公网地址完全可以 302 到 `http://169.254.169.254/…`（云元数据）或
+ * `http://127.0.0.1/…`，校验形同虚设 —— 这正是典型的 SSRF 重定向绕过。
+ * 这里改为 `redirect: "manual"`，逐跳校验后再继续。
+ *
+ * 【运行时差异兜底】
+ * Cloudflare Workers 的 `manual` 会返回真实 3xx（Location 可读），
+ * 而浏览器语义会返回 opaqueredirect（status 0、响应头不可读）。
+ * 万一落到后者，就退回 `follow`，但事后用 `res.url` 校验最终落点 ——
+ * 宁可校验得晚一点，也不能让重定向把 SSRF 防护整个绕过去。
+ */
+export async function guardedFetch(
+	target: string,
+	opts: GuardedFetchOptions = {},
+): Promise<GuardedFetchResult> {
+	const doFetch = opts.fetcher ?? fetch;
+	const method = opts.method ?? "GET";
+	const headersFor = (u: string): Record<string, string> | undefined =>
+		typeof opts.headers === "function" ? opts.headers(u) : opts.headers;
+	const baseInit = {
+		method,
+		...(opts.cf ? { cf: opts.cf } : {}),
+	};
+
+	let url = target;
+	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+		if (!isSafeUpstream(url)) {
+			return { ok: false, error: `blocked upstream after ${hop} redirect(s): ${hostOf(url)}` };
+		}
+		const res = await doFetch(url, {
+			...baseInit,
+			headers: headersFor(url),
+			redirect: "manual",
+		} as RequestInit);
+
+		if (res.status === 0 || res.type === "opaqueredirect") {
+			const followed = await doFetch(url, {
+				...baseInit,
+				headers: headersFor(url),
+				redirect: "follow",
+			} as RequestInit);
+			if (!isSafeUpstream(followed.url)) {
+				await cancelBody(followed);
+				return { ok: false, error: `blocked redirect target: ${hostOf(followed.url)}` };
+			}
+			return { ok: true, res: followed, finalUrl: followed.url };
+		}
+
+		if (res.status >= 300 && res.status < 400) {
+			const location = res.headers.get("location");
+			await cancelBody(res);
+			if (!location) return { ok: false, error: "redirect without location" };
+			try {
+				url = new URL(location, url).toString();
+			} catch {
+				return { ok: false, error: "malformed redirect location" };
+			}
+			continue;
+		}
+		return { ok: true, res, finalUrl: url };
+	}
+	return { ok: false, error: `too many redirects (>${MAX_REDIRECTS})` };
 }
 
 // ---------------------------------------------------------------- 令牌

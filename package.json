@@ -1,6 +1,6 @@
 {
   "name": "auroratv",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "AuroraTV - 影视聚合播放（基于 MoonTVPlus 魔改），部署于 Cloudflare Workers",
   "scripts": {
@@ -32,5 +32,11 @@
     "eslint-config-next": "15.5.27",
     "typescript": "^5.9.3",
     "wrangler": "^4.125.0"
+  },
+  "optionalDependencies": {
+    "@ast-grep/napi-linux-arm64-gnu": "0.40.5",
+    "@ast-grep/napi-linux-x64-gnu": "0.40.5",
+    "@next/swc-linux-arm64-gnu": "15.5.27",
+    "@next/swc-linux-x64-gnu": "15.5.27"
   }
 }

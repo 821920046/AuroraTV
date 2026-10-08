@@ -58,6 +58,8 @@ export default function Player(props: PlayerProps) {
 	const stallRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const recoverRef = useRef(0);
 	const reportedRef = useRef(false);
+	/** 用户手动换线路时置位：手动换线不代表片源真实质量，不计入上报统计 */
+	const manualRef = useRef(false);
 	const progressRef = useRef({ t: 0, buffered: 0, at: 0 });
 
 	const [candIdx, setCandIdx] = useState(0);
@@ -67,6 +69,8 @@ export default function Player(props: PlayerProps) {
 	const [level, setLevel] = useState(-1);
 	const [speed, setSpeed] = useState(1);
 	const [needTap, setNeedTap] = useState(false);
+	/** 每次 +1 都强制重挂媒体（见 retry 的说明） */
+	const [reloadKey, setReloadKey] = useState(0);
 
 	// 候选线路：首选在前，另一条兼得后。两条都挂才算真的失败。
 	const candidates = useMemo<Candidate[]>(() => {
@@ -105,7 +109,8 @@ export default function Player(props: PlayerProps) {
 	/** 上报播放结果（成功与失败都上报，才能算出真实成功率） */
 	const report = useCallback(
 		(ok: boolean, mode?: string) => {
-			if (!sourceId || reportedRef.current) return;
+			// manualRef：用户手动切的线路，其成败不能算到这个片源头上，否则会污染健康评分
+			if (!sourceId || reportedRef.current || manualRef.current) return;
 			reportedRef.current = true;
 			void fetch("/api/sources", {
 				method: "POST",
@@ -142,7 +147,9 @@ export default function Player(props: PlayerProps) {
 
 		let disposed = false;
 		recoverRef.current = 0;
-		reportedRef.current = false;
+		// 手动换线时保持「已上报」状态，让本次挂载不再上报（manualRef 读后即清）
+		reportedRef.current = manualRef.current;
+		manualRef.current = false;
 		setStatus("loading");
 		setNeedTap(false);
 		setLevels([]);
@@ -337,10 +344,11 @@ export default function Player(props: PlayerProps) {
 			}
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [current?.url, current?.mode]);
+	}, [current?.url, current?.mode, reloadKey]);
 
 	// 地址变化（切集/换源）时重置到首选线路
 	useEffect(() => {
+		manualRef.current = false;
 		setCandIdx(0);
 		setStatus("loading");
 		setMessage("");
@@ -392,29 +400,24 @@ export default function Player(props: PlayerProps) {
 
 	const switchLine = useCallback(() => {
 		if (candidates.length < 2) return;
-		reportedRef.current = true; // 手动换线不计入源质量统计
+		manualRef.current = true; // 手动换线不计入源质量统计
 		setStatus("loading");
 		setMessage("");
 		setCandIdx((i) => (i + 1) % candidates.length);
 	}, [candidates.length]);
 
 	const retry = useCallback(() => {
-		reportedRef.current = false;
+		manualRef.current = false;
 		recoverRef.current = 0;
 		setStatus("loading");
 		setMessage("");
 		setCandIdx(0);
-		// 强制重新挂载：先置空再恢复
-		const v = videoRef.current;
-		if (v && candidates[0]) {
-			v.removeAttribute("src");
-			v.load();
-			if (!isHlsUrl(candidates[0].url) || !Hls.isSupported()) {
-				v.src = candidates[0].url;
-				void v.play().catch(() => undefined);
-			}
-		}
-	}, [candidates]);
+		// 【为什么需要 reloadKey】candIdx 本来就是 0 时，setCandIdx(0) 不会引发重渲染，
+		// 挂载媒体的 effect 也就不会重跑；而 HLS 走的是 hls.js 分支，从不设置 video.src，
+		// 于是「重试」按钮在 hls.js 路径下等于完全没有反应。reloadKey 强制 effect 重挂媒体，
+		// 直连与 hls.js 两条路径都能真正重试。
+		setReloadKey((k) => k + 1);
+	}, []);
 
 	const changeSpeed = useCallback((s: number) => {
 		setSpeed(s);

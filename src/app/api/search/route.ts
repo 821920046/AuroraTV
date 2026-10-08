@@ -22,14 +22,24 @@ export async function GET(req: NextRequest) {
 
 	try {
 		const { env } = getCloudflareContext();
-		const key = makeCacheKey("search", kw.toLowerCase(), { v: 2 });
 
-		const cached = await cacheGetWithKv<{ list: unknown[]; total: number }>(key, env);
-		if (cached) return NextResponse.json({ code: 200, cached: true, ...cached });
-
+		// 片源集合先读：它既是搜索的前提，也是缓存键的一部分。
 		const sources = await getEnabledSources(env.AURORA_DB);
 		if (sources.length === 0)
 			return NextResponse.json({ code: 503, msg: "没有可用片源，请先在后台导入片源", list: [] });
+
+		// 缓存键必须绑定「当前片源集合」。
+		// 病因：原键只含 { v: 2 } 这个手改的版本号，站长导入 / 删除 / 启停片源后，
+		// 用户仍会命中 30 分钟前的旧结果，表现为「后台明明加了源，前台却搜不到」。
+		// 用排序后的 id:weight 做指纹，集合一变键就变，无需人工改版本号。
+		const srcFingerprint = sources
+			.map((s) => `${s.id}:${s.weight ?? 0}`)
+			.sort()
+			.join(",");
+		const key = makeCacheKey("search", kw.toLowerCase(), { v: 3, src: srcFingerprint });
+
+		const cached = await cacheGetWithKv<{ list: unknown[]; total: number }>(key, env);
+		if (cached) return NextResponse.json({ code: 200, cached: true, ...cached });
 
 		const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : undefined;
 		const items = await aggregateSearch(kw, sources, health);
