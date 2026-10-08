@@ -194,14 +194,20 @@ export async function verifyToken(
 
 /**
  * 一次请求内复用签名：按前缀缓存，改写一条 500 片的播放列表也只做 1 次 HMAC。
+ *
+ * 注意：这里刻意【不用】TS 的构造函数参数属性（`constructor(private x: T)`）——
+ * 那属于不可擦除语法，会让本模块无法被 Node 的 strip-only 模式直接加载，
+ * 也就跑不了单测。显式字段声明虽然啰嗦，但换来了可测性。
  */
 export class TokenMinter {
 	private readonly cache = new Map<string, Promise<string>>();
+	private readonly secret: string;
+	private readonly ttl: number;
 
-	constructor(
-		private readonly secret: string,
-		private readonly ttl: number = DEFAULT_TOKEN_TTL,
-	) {}
+	constructor(secret: string, ttl: number = DEFAULT_TOKEN_TTL) {
+		this.secret = secret;
+		this.ttl = ttl;
+	}
 
 	private token(prefix: string): Promise<string> {
 		let t = this.cache.get(prefix);

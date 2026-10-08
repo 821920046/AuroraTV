@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import Link from "next/link";
 
 type SourceItem = {
 	id: string;
@@ -244,7 +245,9 @@ export default function Admin() {
 				<img className="logo-badge" src="/logo.png" alt="AuroraTV" />
 				<span className="wordmark">AuroraTV</span>
 				<div className="header-spacer" />
-				<a className="header-link" href="/">返回首页</a>
+				<Link className="header-link" href="/">
+					返回首页
+				</Link>
 			</header>
 
 			<main className="container">

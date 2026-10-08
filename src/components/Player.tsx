@@ -346,6 +346,17 @@ export default function Player(props: PlayerProps) {
 		setMessage("");
 	}, [url, proxyUrl]);
 
+	const toggleFullscreen = useCallback(async () => {
+		const el = videoRef.current?.parentElement;
+		if (!el) return;
+		try {
+			if (document.fullscreenElement) await document.exitFullscreen();
+			else await el.requestFullscreen();
+		} catch {
+			/* ignore */
+		}
+	}, []);
+
 	// 键盘快捷键
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
@@ -365,18 +376,8 @@ export default function Player(props: PlayerProps) {
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, []);
-
-	const toggleFullscreen = useCallback(async () => {
-		const el = videoRef.current?.parentElement;
-		if (!el) return;
-		try {
-			if (document.fullscreenElement) await document.exitFullscreen();
-			else await el.requestFullscreen();
-		} catch {
-			/* ignore */
-		}
-	}, []);
+		// toggleFullscreen 是 deps 为 [] 的 useCallback，引用稳定，不会导致反复注册。
+	}, [toggleFullscreen]);
 
 	const togglePip = useCallback(async () => {
 		const v = videoRef.current as (HTMLVideoElement & { requestPictureInPicture?: () => Promise<unknown> }) | null;

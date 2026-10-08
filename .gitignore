@@ -6,3 +6,15 @@ node_modules/
 *.log
 .DS_Store
 .env*.local
+
+# Next 增量编译信息
+*.tsbuildinfo
+
+# 构建/导出产物
+*.zip
+out/
+dist/
+
+# 早期遗留的重复副本（仓库根目录才是真正的工程）。
+# 它会被 tsconfig 的 include 通配到，污染类型检查，因此必须排除。
+auroratv/

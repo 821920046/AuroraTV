@@ -5,16 +5,44 @@ on:
   push:
     branches: [main]
 
+# 同一分支只保留最新一次部署，避免并发部署互相覆盖。
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  deploy:
+  # 先过关再部署：类型 / 单测 / lint 任一不过就不发版。
+  # 这三道闸门此前完全缺失 —— CI 只跑 build，而 build 里
+  # typescript.ignoreBuildErrors 又把类型错误吞掉了。
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - name: Install deps
-        run: npm install --legacy-peer-deps
+          node-version: 22
+          cache: npm
+      # 用 npm ci 而不是 npm install：锁文件保证可复现。
+      # 依赖冲突已在 package.json 中真正修掉（workers-types 升到 v5），
+      # 因此不再需要 --legacy-peer-deps 这类掩盖问题的开关。
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Lint
+        run: npm run lint
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - name: Apply D1 migrations (remote)
         run: npx wrangler d1 migrations apply auroratv-db --remote
         env:

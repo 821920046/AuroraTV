@@ -6,6 +6,8 @@ declare global {
 		USERNAME?: string;
 		PASSWORD?: string;
 		CRON_SECRET?: string;
+		/** 流代理 HMAC 签名密钥（见 lib/proxy.ts）。未配置时回退到 CRON_SECRET / PASSWORD。 */
+		STREAM_SECRET?: string;
 		NEXT_PUBLIC_SITE_NAME?: string;
 	}
 }

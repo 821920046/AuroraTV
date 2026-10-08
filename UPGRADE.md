@@ -1,3 +1,90 @@
+# AuroraTV 升级说明（v0.3.0）
+
+> v0.2.0 的流代理升级见本文档下半部分。以下为 v0.3.0 的修复。
+
+## 一、`npm ci` 装不上：依赖冲突被 `--legacy-peer-deps` 掩盖
+
+**现象**：在干净环境（CI、新克隆）执行 `npm ci` 或 `npm install` 直接失败：
+
+```
+npm error Conflicting peer dependency: @cloudflare/workers-types@5.20261008.1
+npm error   peerOptional @cloudflare/workers-types@"^5.20261006.1" from wrangler@4.148.0
+npm error   peer wrangler@"^4.125.0" from @opennextjs/cloudflare@1.20.9
+```
+
+**根因**：`@cloudflare/workers-types` 锁在 `^4.x`，而 `wrangler ^4` 的最新版要求 `^5.x`。
+
+**为什么一直没被发现**：CI 用的是 `npm install --legacy-peer-deps`——这个开关让 npm 忽略 peer 冲突，
+于是「装不上」被降级成一条 warning。加上仓库**没有 `package-lock.json`**，
+每次 CI 解析出的依赖树都可能不同，问题只会更隐蔽。
+
+**修复**：把 `@cloudflare/workers-types` 升到 `^5.20261006.1`，提交 `package-lock.json`，
+CI 改用 `npm ci`，并**移除 `--legacy-peer-deps`**。
+
+## 二、构建闸门被关掉，类型错误静默进生产
+
+`next.config.mjs` 里曾写着：
+
+```js
+typescript: { ignoreBuildErrors: true },
+eslint: { ignoreDuringBuilds: true },
+```
+
+这是为了绕开**真实存在的类型错误**（不是误报）。根因是 `@cloudflare/workers-types` 把全局
+`Response.json()` 重载为 `Promise<unknown>`，于是下面这种写法类型不匹配：
+
+```ts
+fetch("/api/home").then((r) => r.json()).then((d: { movies?: Item[] }) => { ... })
+//                                 ^^^^^^ unknown 不能赋给具体类型
+```
+
+正确做法是**显式断言**而不是给参数加注解：
+
+```ts
+.then((raw) => { const d = raw as { movies?: Item[]; tv?: Item[] }; ... })
+```
+
+已修复 `src/app/page.tsx` 与 `src/app/live/page.tsx` 两处，随后**移除两个 ignore 开关**，
+并把 `typecheck` / `test` / `lint` 加进 CI 作为部署前置闸门。
+
+## 三、SSRF：签名校验被重定向绕过
+
+`/api/stream` 的签名只绑定「发起请求的那个 URL」，但取流时用的是 `redirect: "follow"`。
+这意味着一个**通过了全部校验的公网地址**，只要 302 跳到 `http://169.254.169.254/…`
+（云元数据）或 `http://127.0.0.1/…`，就能把 `isSafeUpstream()` 整个绕过去。
+
+**修复**：改为 `redirect: "manual"`，手动跟随重定向，**每一跳都重新做地址校验**，
+并限制最多 3 跳。顺带修正了一处相关问题：跳转后 Referer 必须按当前域名重新生成，
+否则部分防盗链会拒绝。
+
+## 四、其他
+
+- **`env.d.ts` / `.dev.vars.example` 补上 `STREAM_SECRET`**。
+  `lib/proxy.ts` 一直在读它，但两处声明都没有——`.dev.vars.example` 里没有，
+  部署者不会知道要配这个变量，于是代理签名静默退化成「用 PASSWORD 甚至内置默认值」。
+- **`TokenMinter` 去掉构造函数参数属性**（`constructor(private x: T)`）。
+  那是不可擦除语法，会让 Node 的 strip-only 模式无法加载该模块，直接后果是**没法单测**。
+- **新增 22 项零依赖单测**（`src/lib/proxy.test.mts`，用 Node 内置 test runner，不引入任何框架），
+  覆盖 SSRF 地址矩阵、HMAC 令牌往返/过期/篡改/前缀绑定、m3u8 的 `URI="..."` 改写。
+- **修复 lint 问题**：`<a>` 内链改用 `next/link`；`<img>` 的 eslint-disable 注释位置错误
+  （注释在 `return (` 上方，管不到下一行的 `<img>`，等于没生效）；`Player.tsx` 快捷键 effect 补全依赖。
+- **`tsconfig.json` 排除 `auroratv/`**：仓库里残留的旧副本会被 `include: ["**/*.ts"]` 通配到，
+  污染类型检查（会报出一堆与本工程无关的错误）。
+- **`.gitignore` 补全** `*.tsbuildinfo`、`*.zip`、`auroratv/`。
+- **修正 README**：原文仍写着「绝不代理视频流」，与已经落地的 `/api/stream` 直接矛盾，会误导部署者。
+
+## 五、验证结果
+
+| 闸门 | 结果 |
+| --- | --- |
+| `npm ci`（干净环境，不带 `--legacy-peer-deps`） | ✅ 通过 |
+| `npm run typecheck` | ✅ 无错误 |
+| `npm test` | ✅ 22/22 通过 |
+| `npm run lint` | ✅ 0 error / 0 warning |
+| `next build` + `opennextjs-cloudflare build` | ✅ 产出 `.open-next/worker.js` |
+
+---
+
 # AuroraTV 升级说明（v0.2.0）
 
 ## 一、病因：为什么「点播放没反应」

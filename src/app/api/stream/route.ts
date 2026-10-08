@@ -4,6 +4,7 @@ import {
 	TokenMinter,
 	getProxySecret,
 	isLivePlaylist,
+	isSafeUpstream,
 	looksLikePlaylistType,
 	looksLikePlaylistUrl,
 	rewritePlaylist,
@@ -65,6 +66,88 @@ export async function GET(req: NextRequest): Promise<Response> {
 
 type Attempt = { variant: HeaderVariant; status: number | string };
 
+/** 最多跟随多少跳重定向 */
+const MAX_REDIRECTS = 3;
+
+/**
+ * 带 SSRF 防护的取流：手动跟随重定向，**每一跳都重新做地址校验**。
+ *
+ * 【为什么必须手动跟随】
+ * 签名只绑定「发起请求的那个 URL」。若用 `redirect: "follow"`，一个通过校验的
+ * 公网地址完全可以 302 到 `http://169.254.169.254/…`（云元数据）或
+ * `http://127.0.0.1/…`，校验形同虚设 —— 这正是典型的 SSRF 重定向绕过。
+ * 这里改为 `redirect: "manual"`，逐跳校验后再继续。
+ */
+async function fetchGuarded(
+	target: string,
+	method: "GET" | "HEAD",
+	range: string | null,
+	variant: HeaderVariant,
+): Promise<{ res: Response; finalUrl: string } | { error: string }> {
+	let url = target;
+	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+		if (!isSafeUpstream(url)) {
+			return { error: `blocked upstream after ${hop} redirect(s): ${hostOf(url)}` };
+		}
+		// Referer 必须按「当前这一跳」的域名生成，跳转后仍带旧域名的 Referer 会被拒。
+		const headers = upstreamHeaders(url, range ? { range } : undefined, variant);
+		const res = await fetch(url, {
+			method,
+			headers,
+			redirect: "manual",
+			cf: { cacheEverything: false },
+		} as RequestInit);
+
+		// 运行时差异兜底：Cloudflare Workers 的 `manual` 会返回真实 3xx（Location 可读），
+		// 而浏览器语义会返回 opaqueredirect（status 0、响应头不可读）。
+		// 万一落到后者，就退回 `follow`，但事后用 res.url 校验最终落点 —— 宁可
+		// 校验得晚一点，也不能让重定向把 SSRF 防护整个绕过去。
+		if (res.status === 0 || res.type === "opaqueredirect") {
+			const followed = await fetch(url, {
+				method,
+				headers,
+				redirect: "follow",
+				cf: { cacheEverything: false },
+			} as RequestInit);
+			if (!isSafeUpstream(followed.url)) {
+				try {
+					await followed.body?.cancel();
+				} catch {
+					/* ignore */
+				}
+				return { error: `blocked redirect target: ${hostOf(followed.url)}` };
+			}
+			return { res: followed, finalUrl: followed.url };
+		}
+
+		if (res.status >= 300 && res.status < 400) {
+			const location = res.headers.get("location");
+			try {
+				await res.body?.cancel();
+			} catch {
+				/* ignore */
+			}
+			if (!location) return { error: "redirect without location" };
+			try {
+				url = new URL(location, url).toString();
+			} catch {
+				return { error: "malformed redirect location" };
+			}
+			continue;
+		}
+		return { res, finalUrl: url };
+	}
+	return { error: `too many redirects (>${MAX_REDIRECTS})` };
+}
+
+function hostOf(raw: string): string {
+	try {
+		return new URL(raw).host;
+	} catch {
+		return "invalid-url";
+	}
+}
+
 async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Response> {
 	const target = req.nextUrl.searchParams.get("u");
 	const token = req.nextUrl.searchParams.get("t");
@@ -80,27 +163,29 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	const attempts: Attempt[] = [];
 	let upstream: Response | null = null;
 	let usedVariant: HeaderVariant = "browser";
+	let finalUrl = target;
 
 	// ---------- 请求头降级梯子 ----------
 	for (const variant of HEADER_LADDER) {
-		const headers = upstreamHeaders(target, range ? { range } : undefined, variant);
 		try {
-			const res = await fetch(target, {
-				method,
-				headers,
-				redirect: "follow",
-				cf: { cacheEverything: false },
-			} as RequestInit);
+			const got = await fetchGuarded(target, method, range, variant);
+			if ("error" in got) {
+				attempts.push({ variant, status: got.error });
+				continue;
+			}
+			const { res } = got;
 			attempts.push({ variant, status: res.status });
 			if (res.ok || res.status === 206) {
 				upstream = res;
 				usedVariant = variant;
+				finalUrl = got.finalUrl;
 				break;
 			}
 			// 只有「看起来像被风控」的状态才值得换头重试；404/410 是确定性失败，直接放弃
 			if (![401, 403, 405, 406, 429].includes(res.status) && res.status < 500) {
 				upstream = res;
 				usedVariant = variant;
+				finalUrl = got.finalUrl;
 				break;
 			}
 			// 丢弃本次 body，避免 Workers 警告未读取的响应体
@@ -132,7 +217,6 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 		);
 	}
 
-	const finalUrl = upstream.url || target;
 	const ct = upstream.headers.get("content-type");
 	const isPlaylist = looksLikePlaylistType(ct) || looksLikePlaylistUrl(finalUrl);
 

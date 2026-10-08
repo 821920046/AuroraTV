@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import Player from "@/components/Player";
 
 type Channel = {
@@ -69,9 +70,11 @@ export default function Live() {
 		if (ch.epg_id) {
 			fetch("/api/live/epg?epgId=" + encodeURIComponent(ch.epg_id))
 				.then((x) => x.json())
-				.then((e: { now?: EpgItem | null; next?: EpgItem | null }) =>
-					setEpg({ now: e.now, next: e.next }),
-				)
+				// 同 page.tsx：workers-types 下 Response.json() 是 unknown，需显式断言。
+				.then((raw) => {
+					const e = raw as { now?: EpgItem | null; next?: EpgItem | null };
+					setEpg({ now: e.now, next: e.next });
+				})
 				.catch(() => undefined);
 		}
 	}
@@ -89,12 +92,12 @@ export default function Live() {
 				<img className="logo-badge" src="/logo.png" alt="AuroraTV" />
 				<span className="wordmark">AuroraTV</span>
 				<div className="header-spacer" />
-				<a className="header-link" href="/">
+				<Link className="header-link" href="/">
 					点播
-				</a>
-				<a className="header-link" href="/admin">
+				</Link>
+				<Link className="header-link" href="/admin">
 					管理
-				</a>
+				</Link>
 			</header>
 
 			<main className="container">

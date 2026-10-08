@@ -87,8 +87,10 @@ function fmtTime(s: number): string {
 function Poster({ src, alt }: { src?: string | null; alt: string }) {
 	const [bad, setBad] = useState(false);
 	if (!src || bad) return <div className="poster-fallback">{alt.slice(0, 6)}</div>;
-	// eslint-disable-next-line @next/next/no-img-element
+	// 项目在 Workers 上关闭了 Next 图片优化（images.unoptimized），且海报一律走
+	// /api/img 代理，因此这里刻意使用原生 <img>。注释必须紧贴 <img> 才生效。
 	return (
+		// eslint-disable-next-line @next/next/no-img-element
 		<img
 			src={src}
 			alt={alt}
@@ -127,7 +129,10 @@ export default function HomePage() {
 		let alive = true;
 		fetch("/api/home")
 			.then((r) => r.json())
-			.then((d: { movies?: Item[]; tv?: Item[] }) => {
+			// 注意：@cloudflare/workers-types 把全局 Response.json() 标为 Promise<unknown>，
+			// 因此这里必须显式断言，不能靠参数注解（注解会与 unknown 冲突）。
+			.then((raw) => {
+				const d = raw as { movies?: Item[]; tv?: Item[] };
 				if (alive) setHome({ movies: d.movies ?? [], tv: d.tv ?? [] });
 			})
 			.catch(() => undefined)
