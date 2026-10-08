@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import Link from "next/link";
+import SiteHeader from "@/components/SiteHeader";
 
 type SourceItem = {
 	id: string;
@@ -240,15 +240,7 @@ export default function Admin() {
 
 	return (
 		<>
-			<header className="site-header">
-				{/* eslint-disable-next-line @next/next/no-img-element */}
-				<img className="logo-badge" src="/logo.png" alt="AuroraTV" />
-				<span className="wordmark">AuroraTV</span>
-				<div className="header-spacer" />
-				<Link className="header-link" href="/">
-					返回首页
-				</Link>
-			</header>
+			<SiteHeader />
 
 			<main className="container">
 				<h1 className="admin-title">片源管理</h1>
@@ -352,45 +344,48 @@ export default function Admin() {
 					{sources.length === 0 ? (
 						<p className="admin-hint">还没有任何片源。用上面的「导入」或「添加」加入你自己获取的合法源。</p>
 					) : (
-						<table className="admin-table">
-							<thead>
-								<tr>
-									<th>名称</th>
-									<th>API</th>
-									<th>评分</th>
-									<th>网页可播</th>
-									<th>状态</th>
-									<th />
-								</tr>
-							</thead>
-							<tbody>
-								{sources.map((s) => (
-									<tr key={s.id}>
-										<td>{s.name}</td>
-										<td className="api-cell">{s.api}</td>
-										<td>{s.score != null ? s.score.toFixed(2) : "—"}</td>
-										<td>{s.cors === 1 ? "🌐 可播" : s.cors === 0 ? "📋 仅VLC" : "—"}</td>
-										<td>
-											<button
-												className={
-													"pill " +
-													(s.enabled !== false ? "on" : s.auto_disabled ? "auto" : "off")
-												}
-												onClick={() => toggle(s)}
-												title={s.fail_streak ? "连续失败 " + s.fail_streak + " 轮" : undefined}
-											>
-												{s.enabled !== false ? "启用" : s.auto_disabled ? "自动停用" : "停用"}
-											</button>
-										</td>
-										<td>
-											<button className="pill danger" onClick={() => remove(s)}>
-												删除
-											</button>
-										</td>
+						/* 窄屏下表格横向滚动，而不是把整页撑出横向滚动条 */
+						<div className="table-scroll">
+							<table className="admin-table">
+								<thead>
+									<tr>
+										<th>名称</th>
+										<th>API</th>
+										<th>评分</th>
+										<th>网页可播</th>
+										<th>状态</th>
+										<th />
 									</tr>
-								))}
-							</tbody>
-						</table>
+								</thead>
+								<tbody>
+									{sources.map((s) => (
+										<tr key={s.id}>
+											<td>{s.name}</td>
+											<td className="api-cell">{s.api}</td>
+											<td>{s.score != null ? s.score.toFixed(2) : "—"}</td>
+											<td>{s.cors === 1 ? "🌐 可播" : s.cors === 0 ? "📋 仅VLC" : "—"}</td>
+											<td>
+												<button
+													className={
+														"pill " +
+														(s.enabled !== false ? "on" : s.auto_disabled ? "auto" : "off")
+													}
+													onClick={() => toggle(s)}
+													title={s.fail_streak ? "连续失败 " + s.fail_streak + " 轮" : undefined}
+												>
+													{s.enabled !== false ? "启用" : s.auto_disabled ? "自动停用" : "停用"}
+												</button>
+											</td>
+											<td>
+												<button className="pill danger" onClick={() => remove(s)}>
+													删除
+												</button>
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
 					)}
 				</section>
 

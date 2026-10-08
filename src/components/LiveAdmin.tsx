@@ -190,7 +190,8 @@ export default function LiveAdmin() {
 				一键添加推荐国内源
 			</button>
 
-			{sources.length > 0 && (
+		{sources.length > 0 && (
+			<div className="table-scroll">
 				<table className="admin-table live-admin-table">
 					<thead>
 						<tr>
@@ -222,7 +223,8 @@ export default function LiveAdmin() {
 						))}
 					</tbody>
 				</table>
-			)}
+			</div>
+		)}
 		</section>
 	);
 }

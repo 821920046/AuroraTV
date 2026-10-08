@@ -14,6 +14,9 @@
 - **源健康检测**：独立调度 Worker + Cron；服务端探活与客户端播放上报共同参与评分，连续失败自动停用、恢复后自动启用。
 - **直播电视**：接入 M3U 播放列表，频道入库 D1，Cron 定时摄取与探活择优。
 - **站长鉴权**：Basic Auth 中间件保护全站（代理路由改用 HMAC 鉴权，以便外部播放器可用）。
+- **界面**：三个页面（`/` 点播、`/live` 直播、`/admin` 管理）共用一套设计令牌与统一导航；
+  深色主题、手机/平板/桌面三档响应式、支持键盘导航与 `prefers-reduced-motion`。
+  样式集中在 `src/app/globals.css`（纯 CSS + CSS 变量，无 UI 框架依赖）。
 
 ## 📁 目录结构
 
@@ -36,7 +39,7 @@ auroratv/
 │  │  ├─ live/page.tsx            # 直播频道 UI
 │  │  ├─ page.tsx                 # 搜索 + 播放 UI
 │  │  └─ globals.css
-│  ├─ components/                 # Player.tsx / LiveAdmin.tsx
+│  ├─ components/                 # SiteHeader.tsx / Player.tsx / LiveAdmin.tsx
 │  ├─ lib/
 │  │  ├─ proxy.ts                 # 签名铸造/校验、SSRF 防护、m3u8 改写
 │  │  ├─ http.ts                  # 统一超时/重试/伪装请求头/容错 JSON
