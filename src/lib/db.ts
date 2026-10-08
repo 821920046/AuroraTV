@@ -1,3 +1,69 @@
+// ---------------------------------------------------------------- 部署级配置
+
+/**
+ * 读取配置项；不存在时用 makeValue() 生成一个写入后再回读。
+ *
+ * 【为什么要「先插后读」而不是「先查后插再返回自己生成的值」】
+ * Workers 会同时跑多个 isolate，首次访问时它们可能同时发现「没有值」，
+ * 于是各自生成一份并写入。若直接返回自己生成的那份，就会出现
+ * A isolate 用密钥1 签发、B isolate 用密钥2 校验 —— 表现为随机 403，
+ * 且极难排查。改成 INSERT ... ON CONFLICT DO NOTHING + 回读之后，
+ * 落库的那一份是唯一的权威值，所有 isolate 读到的都是同一个。
+ *
+ * 任何异常（迁移 0008 未执行、D1 未绑定、写额度耗尽）都降级为 null，
+ * 由调用方决定兜底策略 —— 绝不能因为「读不到配置」让接口整体 500。
+ */
+export async function getOrCreateSetting(
+	db: D1Database,
+	key: string,
+	makeValue: () => string,
+): Promise<string | null> {
+	try {
+		const found = await db
+			.prepare("SELECT value FROM app_setting WHERE key = ?1")
+			.bind(key)
+			.first<{ value: string }>();
+		if (found?.value) return found.value;
+
+		await db
+			.prepare(
+				"INSERT INTO app_setting (key, value, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO NOTHING",
+			)
+			.bind(key, makeValue(), Date.now())
+			.run();
+
+		const after = await db
+			.prepare("SELECT value FROM app_setting WHERE key = ?1")
+			.bind(key)
+			.first<{ value: string }>();
+		return after?.value ?? null;
+	} catch (e) {
+		console.error(`getOrCreateSetting(${key}) failed:`, e);
+		return null;
+	}
+}
+
+/** 生成 32 字节（256 bit）随机密钥，hex 表示。 */
+export function randomSecret(): string {
+	const bytes = new Uint8Array(32);
+	crypto.getRandomValues(bytes);
+	let s = "";
+	for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, "0");
+	return s;
+}
+
+const PROXY_SECRET_KEY = "proxy_secret";
+
+/**
+ * 取（或首次生成）本部署的代理签名密钥。
+ * 返回值只在成功落库/回读时为字符串；D1 不可用时返回 null，交由 lib/secret.ts 兜底。
+ */
+export function getOrCreatePersistedSecret(db: D1Database): Promise<string | null> {
+	return getOrCreateSetting(db, PROXY_SECRET_KEY, randomSecret);
+}
+
+// ---------------------------------------------------------------- 源健康
+
 export type SourceHealth = {
 	source_id: string;
 	success_rate: number;

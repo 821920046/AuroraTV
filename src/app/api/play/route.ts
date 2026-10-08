@@ -3,7 +3,8 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fetchDetail, parseAllGroups, pickPlayGroup, type Episode } from "@/lib/aggregator";
 import { getAllSources } from "@/lib/sources";
 import { getSourceHealthMap } from "@/lib/db";
-import { TokenMinter, getProxySecret } from "@/lib/proxy";
+import { TokenMinter } from "@/lib/proxy";
+import { resolveProxySecret } from "@/lib/secret";
 
 export const dynamic = "force-dynamic";
 
@@ -49,7 +50,8 @@ export async function GET(req: NextRequest) {
 
 		const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : {};
 		const corsOk = health[sourceId]?.cors === 1;
-		const minter = new TokenMinter(getProxySecret(env));
+		const { secret } = await resolveProxySecret(env);
+		const minter = new TokenMinter(secret);
 
 		const episodes = await Promise.all(
 			chosen.map(async (e, i) => ({

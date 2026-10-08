@@ -4,7 +4,8 @@ import { aggregateSearch } from "@/lib/aggregator";
 import { getEnabledSources } from "@/lib/sources";
 import { getSourceHealthMap } from "@/lib/db";
 import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
-import { TokenMinter, getProxySecret } from "@/lib/proxy";
+import { TokenMinter } from "@/lib/proxy";
+import { resolveProxySecret } from "@/lib/secret";
 
 export const dynamic = "force-dynamic";
 
@@ -45,7 +46,8 @@ export async function GET(req: NextRequest) {
 		const items = await aggregateSearch(kw, sources, health);
 
 		// 海报一律走同源代理，消除 http 混合内容导致的满屏碎图
-		const minter = new TokenMinter(getProxySecret(env));
+		const { secret } = await resolveProxySecret(env);
+		const minter = new TokenMinter(secret);
 		const list = await Promise.all(
 			items.slice(0, 120).map(async (it) => ({
 				...it,

@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getChannel } from "@/lib/live";
-import { TokenMinter, getProxySecret } from "@/lib/proxy";
+import { TokenMinter } from "@/lib/proxy";
+import { resolveProxySecret } from "@/lib/secret";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,8 @@ export async function GET(req: NextRequest) {
 	const ch = await getChannel(env.AURORA_DB, id);
 	if (!ch) return NextResponse.json({ code: 404, msg: "频道不存在" }, { status: 200 });
 
-	const minter = new TokenMinter(getProxySecret(env));
+	const { secret } = await resolveProxySecret(env);
+	const minter = new TokenMinter(secret);
 	return NextResponse.json({
 		code: 200,
 		url: ch.stream_url,

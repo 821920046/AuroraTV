@@ -5,6 +5,9 @@ PASSWORD=change_me
 CRON_SECRET=replace_with_a_long_random_string
 
 # 流代理（/api/stream、/api/img）的 HMAC 签名密钥。
-# 强烈建议单独设置一段 32 位以上随机串；未设置时会回退到 CRON_SECRET / PASSWORD，
-# 三者都没配时使用内置默认值——那等于把代理开放给任何人，务必避免。
+# 不设也没关系：首次访问时会自动生成一个 32 字节随机密钥并持久化到 D1 的
+# app_setting 表（见 migrations/0008_settings.sql），并在 isolate 内复用。
+# 优先级：STREAM_SECRET → CRON_SECRET → D1 持久化密钥 → 公开兜底常量。
+# 注意 PASSWORD 不参与签名（它是后台登录口令，熵低且职责不同）。
+# 想知道当前生效的是哪一种：GET /api/health
 STREAM_SECRET=replace_with_another_long_random_string

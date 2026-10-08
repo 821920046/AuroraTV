@@ -1,6 +1,7 @@
 import { type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { getProxySecret, guardedFetch, verifyToken } from "@/lib/proxy";
+import { guardedFetch, verifyToken } from "@/lib/proxy";
+import { resolveProxySecret } from "@/lib/secret";
 import { upstreamHeaders } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
@@ -76,7 +77,8 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	if (!target) return err(400, "missing u");
 
 	const { env } = getCloudflareContext();
-	const verdict = await verifyToken(getProxySecret(env), token, target);
+	const { secret } = await resolveProxySecret(env);
+	const verdict = await verifyToken(secret, token, target);
 	if (!verdict.ok) return err(403, "img proxy rejected: " + verdict.reason);
 
 	const got = await guardedFetch(target, {

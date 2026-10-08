@@ -2,7 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getChannels, getChannelGroups, getChannelsVersion } from "@/lib/live";
 import { cacheGet, cacheSet, makeCacheKey } from "@/lib/cache";
-import { TokenMinter, getProxySecret } from "@/lib/proxy";
+import { TokenMinter } from "@/lib/proxy";
+import { resolveProxySecret } from "@/lib/secret";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,8 @@ export async function GET(req: NextRequest) {
 			getChannelGroups(env.AURORA_DB),
 		]);
 
-		const minter = new TokenMinter(getProxySecret(env));
+		const { secret } = await resolveProxySecret(env);
+		const minter = new TokenMinter(secret);
 		const channels = await Promise.all(
 			(rawChannels as ChannelRow[]).map(async (c) => ({
 				...c,

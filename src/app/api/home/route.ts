@@ -4,7 +4,8 @@ import { aggregateRecent, type RecentItem } from "@/lib/aggregator";
 import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
 import { getSourceHealthMap } from "@/lib/db";
 import { getEnabledSources } from "@/lib/sources";
-import { TokenMinter, getProxySecret } from "@/lib/proxy";
+import { TokenMinter } from "@/lib/proxy";
+import { resolveProxySecret } from "@/lib/secret";
 
 export const dynamic = "force-dynamic";
 
@@ -28,7 +29,8 @@ export async function GET() {
 		const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : undefined;
 		const { movies, tv } = await aggregateRecent(sources, health, 4);
 
-		const minter = new TokenMinter(getProxySecret(env));
+		const { secret } = await resolveProxySecret(env);
+		const minter = new TokenMinter(secret);
 		const result = {
 			movies: await withProxiedPosters(movies.slice(0, 18), minter),
 			tv: await withProxiedPosters(tv.slice(0, 18), minter),

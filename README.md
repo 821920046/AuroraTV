@@ -118,11 +118,25 @@ npm run cf:deploy
 npx wrangler secret put USERNAME
 npx wrangler secret put PASSWORD
 npx wrangler secret put CRON_SECRET
-npx wrangler secret put STREAM_SECRET   # 强烈建议：流代理签名密钥，32+ 位随机串
+npx wrangler secret put STREAM_SECRET   # 可选：流代理签名密钥，32+ 位随机串
 ```
 
-> `STREAM_SECRET` 未设置时会回退到 `CRON_SECRET` / `PASSWORD`；三者都没有则使用内置默认值，
-> 等于把代理开放给任何人。生产环境请务必设置。
+> **不设 `STREAM_SECRET` 也是安全的**：首次访问时会自动生成一个 32 字节随机密钥，
+> 存入 D1 的 `app_setting` 表（迁移 `0008_settings.sql`）并在 isolate 内复用。
+> 优先级为 `STREAM_SECRET` → `CRON_SECRET` → D1 持久化密钥。
+> 只有「前两者都没配 **且** D1 不可用」时，才会回退到源码里的公开常量 ——
+> 那种状态下 `/api/stream`、`/api/img` 等于没有鉴权。
+>
+> 想知道当前用的是哪一种？访问 `GET /api/health`：
+>
+> ```json
+> { "ok": true, "secret": { "source": "d1", "weak": false }, "db": true, "kv": true, "auth": true }
+> ```
+>
+> `source` 为 `env` / `d1` / `fallback`，`weak: true` 即表示无防护状态（该接口只报状态，不回显密钥）。
+>
+> 注意 `PASSWORD` **不再**作为签名密钥：它是后台登录口令，熵低，且复用会导致
+> 「改口令 = 所有已发出的播放链接立即失效」。职责分离。
 
 ### 8. 部署调度 Worker
 
@@ -147,6 +161,7 @@ npx wrangler deploy
 | GET | `/api/live/channels` · `/api/live/play` · `/api/live/epg` | 直播 |
 | GET/POST | `/api/sources` | 源健康列表 / 播放成败上报 |
 | GET | `/api/cron/health` · `/api/cron/live` | 定时任务，需 `CRON_SECRET` |
+| GET | `/api/health` | 部署自检（密钥来源、D1/KV/鉴权状态），不回显密钥；配了 `USERNAME`/`PASSWORD` 时需 Basic Auth |
 
 ## 🛡️ 安全设计
 
@@ -162,11 +177,16 @@ npx wrangler deploy
   同时不透传上游 `content-length`——Workers 会自动解压并移除 `content-encoding`，
   长度对不上会让浏览器把图片截断。
 - **口令比较定长**：Basic Auth 与 `CRON_SECRET` 均使用定长比较，避免时序侧信道。
+- **代理签名密钥不可预测**：`/api/stream` 与 `/api/img` 被排除在 Basic Auth 之外
+  （`<video>` 原生拉流、VLC 不会带 `Authorization` 头），HMAC 是它们唯一的防线。
+  因此密钥不再有「源码里的公开默认值」这条常规路径——未配置时自动生成随机密钥并持久化到 D1。
+  见下方「已知限制」第 1 条。
 - **安全响应头**：`x-content-type-options` / `referrer-policy` / `x-frame-options` / `permissions-policy`。
 
 ## ⚠️ 已知限制
 
-1. **未做速率限制**。全站有 Basic Auth 兜底，单用户场景风险可接受；多用户部署请自行加限流。
+1. **未做速率限制**。签名密钥已不可预测（见安全设计），但拿到合法链接的人在有效期内仍可反复请求。
+   单用户场景风险可接受；多用户部署请自行加限流（Cloudflare Rate Limiting Rules 即可）。
 2. **`/api/cron/*` 仍兼容 `?secret=`**（为了不破坏已有部署），但该方式会把密钥写进访问日志，新部署请用 `Authorization: Bearer`。
 3. **代理签名在有效期内可重放**。缩短 `DEFAULT_TOKEN_TTL` 可降低风险，代价是长剧连播中途需重新取地址。
 4. **DRM / 地区封锁的流仍播不了**——属上游策略问题，任何代理都无法解决。
@@ -175,6 +195,8 @@ npx wrangler deploy
    本层拦不住。生产部署建议再配 Cloudflare 的 egress 策略。
 6. **中转视频流的合规风险**：Cloudflare 服务条款 2.8 对大量中转非 HTML 内容（尤其视频）有限制。
    自用请设好 `USERNAME`/`PASSWORD`/`STREAM_SECRET`，并控制使用规模。
+7. **签名密钥的兜底状态需自查**：若 `AURORA_DB` 未绑定或迁移未执行，`/api/health` 会显示
+   `secret.source = "fallback"`、`weak: true`。这不是错误状态（服务仍可用），但代理此时无鉴权。
 
 ## ⚠️ 合规与许可证
 

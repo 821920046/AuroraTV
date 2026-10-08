@@ -1,6 +1,91 @@
-# AuroraTV 升级说明（v0.4.0）
+# AuroraTV 升级说明（v0.4.1）
 
-> 本版是 v0.3.0 之后的一轮对抗审查结果。v0.3.0 见本文档第二节，v0.2.0 见下半部分。
+> 本版是 v0.4.0 之后的一轮「把上一轮说过却没做的事兑现」。
+> 下面第一节是 v0.4.1 的改动；「零～八」是 v0.4.0 的对抗审查记录；
+> v0.3.0 及更早见下半部分。
+
+## 【v0.4.1】代理签名密钥：从「公开默认值」到「自动生成并持久化」
+
+### 病因：一条谁都看得见的密钥
+
+`/api/stream` 与 `/api/img` 在 `middleware.ts` 里被**排除在 Basic Auth 之外**：
+
+```ts
+matcher: ["/((?!_next/static|_next/image|favicon.ico|api/cron|api/stream|api/img).*)"],
+```
+
+这个排除是**必须的**——`<video>` 原生拉流、VLC、`.strm` 都不会带 `Authorization` 头。
+于是这两个端点的**唯一防线就是 HMAC 签名**，而签名密钥来自这条回退链：
+
+```ts
+env.STREAM_SECRET || env.CRON_SECRET || env.PASSWORD || "auroratv-default-insecure-secret"
+```
+
+最后那一段是**写在源码里、公开可读的常量**。也就是说：任何一次没配 `STREAM_SECRET` 的部署，
+其代理端点等价于**无鉴权**——攻击者拿这个常量自己铸令牌，就能把本站当开放代理用：
+刷流量（吃你的免费额度、触发 Cloudflare 条款 2.8）、隐藏自己的真实 IP、绕过地区限制。
+而部署者对此**完全无感知**：没有日志、没有告警、没有任何提示。
+
+更糟的是，`proxy.ts` 的注释里写着「此时安全性较弱，**会在 `/api/health` 提示**」——
+而全仓库根本**没有 `/api/health` 这个路由**。`isProxySecretWeak()` 也因此成了死代码，
+除单测外零引用。这是一句典型的「假注释」：承诺了一个不存在的功能，读代码的人会因此以为有人管这件事。
+
+### 修复
+
+**没有采用「没配密钥就拒绝签发」的方案**——那会让「只配了 `PASSWORD` 的老部署」
+升级后立刻播不了，属于破坏性变更。改为**首次访问时自动生成并持久化**：
+
+| 顺序 | 来源 | 说明 |
+| --- | --- | --- |
+| 1 | `STREAM_SECRET` | 显式配置，最高优先级（不变） |
+| 2 | `CRON_SECRET` | 兼容既有部署（不变） |
+| 3 | **D1 `app_setting.proxy_secret`** | **新增**：32 字节 CSPRNG 随机值，首次访问生成后落库 |
+| 4 | 公开常量 | 仅在「1、2 都没配 **且** D1 不可用」时兜底 |
+
+新增文件 / 改动：
+
+- **`migrations/0008_settings.sql`**：`app_setting(key TEXT PRIMARY KEY, value TEXT, created_at INTEGER)`。
+- **`src/lib/db.ts`**：`getOrCreateSetting()` / `getOrCreatePersistedSecret()` / `randomSecret()`。
+- **`src/lib/secret.ts`**（新）：`resolveProxySecret()`，负责 isolate 内缓存与优先级编排。
+- **`src/lib/proxy.ts`**：新增 `INSECURE_DEFAULT_SECRET` / `getExplicitSecret()` / `pickSecret()`；
+  `isProxySecretWeak()` 改为接收**已解析的密钥**；**删除 `getProxySecret()`**（不留死代码）。
+- **`src/app/api/health/route.ts`**（新）：兑现那句注释，只报状态、不回显密钥。
+- 7 处调用点（`home` / `play` / `search` / `img` / `stream` / `live/channels` / `live/play`）
+  由 `new TokenMinter(getProxySecret(env))` 改为 `const { secret } = await resolveProxySecret(env)`。
+
+### 三个容易写错的地方
+
+**① 多 isolate 竞态 —— 不能「返回自己生成的值」。**
+首次访问时多个 isolate 可能同时发现「没有值」并各自生成一份。若直接返回自己那份，
+就会出现 A isolate 用密钥1 签发、B isolate 用密钥2 校验 → **随机 403，且极难排查**。
+所以必须是「`INSERT ... ON CONFLICT(key) DO NOTHING` 之后再回读」：落库的那一份是唯一权威值。
+
+```ts
+const found = await db.prepare("SELECT value FROM app_setting WHERE key = ?1").bind(key).first();
+if (found?.value) return found.value;
+await db.prepare("INSERT INTO app_setting (...) VALUES (?1,?2,?3) ON CONFLICT(key) DO NOTHING")
+        .bind(key, makeValue(), Date.now()).run();
+const after = await db.prepare("SELECT value FROM app_setting WHERE key = ?1").bind(key).first();
+return after?.value ?? null;   // 回读，而不是 return makeValue()
+```
+
+单测 `db.test.mts` 里专门有一条复现这个时序：让首次 SELECT 假装查不到，
+但表里其实已有 `"winner"`，断言最终回读到的是 `"winner"` 而不是自己生成的 `"loser"`。
+
+**② 不能缓存兜底态 —— 否则 D1 一次抖动就永久废掉 isolate。**
+密钥是部署级常量，缓存到 isolate 结束是安全的；但 `fallback` 状态必须带过期时间，
+否则一次 D1 读失败会让该 isolate **在整个生命周期内**都用公开常量。
+
+**③ `PASSWORD` 必须从密钥链里去掉。**
+它是 Basic Auth 登录口令：熵低（人手敲的短口令）、且复用会导致「改口令 = 所有已发出的播放链接
+立即失效」——两件事的轮换周期完全不同。最关键的是，`PASSWORD` 泄漏后攻击者拿到的不只是后台，
+还有「铸造任意代理令牌」的能力。签名只认专用密钥。
+
+### 验证
+
+- `npm run typecheck` ✅ / `npm run lint` ✅（0 warning）
+- `npm test` ✅ **43 项全过**（v0.4.0 为 36 项；新增 `db.test.mts` 5 项 + 密钥优先级 3 项，改写 1 项）
+- `npx next build` ✅ / `npx opennextjs-cloudflare build` ✅
 
 ## 零、【最严重】上一轮的 CI 其实是失败的 —— 锁文件不跨平台
 
@@ -289,6 +374,7 @@ fetch("/api/home").then((r) => r.json()).then((d: { movies?: Item[] }) => { ... 
 - 分片透传 `Range`，可正常拖进度；直播清单 `no-store`，点播分片 `max-age=600`。
 
 **防滥用**：每个代理地址带 HMAC-SHA256 签名，签名绑定「URL 目录前缀 + 过期时间（12h）」，因此一条播放列表只需签一次（500 个分片也只做 1 次 HMAC）；同时有 SSRF 黑名单（回环、私网、CGNAT、链路本地、云元数据、非 http(s) 协议一律拒绝）。密钥取 `STREAM_SECRET` → `CRON_SECRET` → `PASSWORD`。
+（**v0.4.1 已变更**：去掉 `PASSWORD`，并新增「首次访问自动生成随机密钥并持久化到 D1」这一环。见本文档第一节。）
 
 ## 三、完整改动清单
 
@@ -316,7 +402,7 @@ fetch("/api/home").then((r) => r.json()).then((d: { movies?: Item[] }) => { ... 
 ## 四、部署步骤
 
 ```bash
-# 1. 设置流代理签名密钥（强烈建议）
+# 1. 设置流代理签名密钥（可选，见 v0.4.1：不设也会自动生成并持久化）
 npx wrangler secret put STREAM_SECRET     # 输入一段 32+ 位随机串
 
 # 2. 执行新迁移

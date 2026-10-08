@@ -25,24 +25,42 @@ export const DEFAULT_TOKEN_TTL = 60 * 60 * 12;
 export type ProxyEnv = {
 	STREAM_SECRET?: string;
 	CRON_SECRET?: string;
-	PASSWORD?: string;
 };
 
 /**
- * 代理签名密钥。优先用专用 STREAM_SECRET；未配置时退回 CRON_SECRET / PASSWORD，
- * 保证「没配任何 secret 的裸部署」也能开箱即用（此时安全性较弱，会在 /api/health 提示）。
+ * 最后的兜底密钥。**这是一个公开常量，等价于「没有密钥」**：
+ * 任何人拿它就能铸出合法令牌。只有在「既没配 STREAM_SECRET / CRON_SECRET、
+ * 又读不到 D1 持久化密钥」时才会用到；届时 /api/health 会明确报出 weak 状态。
+ *
+ * 之所以仍然保留一个可用的兜底值（而不是直接拒绝签发）：
+ * 直接拒绝会让「只配了 PASSWORD 的老部署」升级后立刻播不了 ——
+ * 那是破坏性变更。现在的做法是「首次访问自动生成持久化密钥」（见 lib/db.ts），
+ * 既不改部署者任何配置，又让可预测的默认密钥在正常路径上彻底消失。
  */
-export function getProxySecret(env: ProxyEnv): string {
-	return (
-		env.STREAM_SECRET ||
-		env.CRON_SECRET ||
-		env.PASSWORD ||
-		"auroratv-default-insecure-secret"
-	);
+export const INSECURE_DEFAULT_SECRET = "auroratv-default-insecure-secret";
+
+/**
+ * 取「显式配置」的签名密钥；都没配则返回 null，由调用方去 D1 取持久化密钥。
+ *
+ * 【为什么这里刻意不含 PASSWORD】
+ *   1) PASSWORD 是 Basic Auth 的登录口令，通常是人手敲的短口令，熵极低；
+ *   2) 把「后台登录口令」复用成「签名密钥」，意味着改口令会让所有已发出的
+ *      播放链接立即失效 —— 两件事的轮换周期完全不同，不该绑在一起；
+ *   3) 最关键的是：PASSWORD 一旦泄漏，攻击者拿到的不只是后台，还有
+ *      「铸造任意代理令牌」的能力。职责分离，签名只认专用密钥。
+ */
+export function getExplicitSecret(env: ProxyEnv): string | null {
+	return env.STREAM_SECRET || env.CRON_SECRET || null;
 }
 
-export function isProxySecretWeak(env: ProxyEnv): boolean {
-	return !env.STREAM_SECRET && !env.CRON_SECRET && !env.PASSWORD;
+/** 密钥选择优先级：显式配置 > D1 持久化随机密钥 > 公开兜底常量。 */
+export function pickSecret(explicit: string | null, persisted: string | null): string {
+	return explicit || persisted || INSECURE_DEFAULT_SECRET;
+}
+
+/** 该密钥是否处于「无防护」状态（即回退到了公开常量）。 */
+export function isProxySecretWeak(secret: string): boolean {
+	return secret === INSECURE_DEFAULT_SECRET;
 }
 
 // ---------------------------------------------------------------- base64url

@@ -5,9 +5,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	DEFAULT_TOKEN_TTL,
+	INSECURE_DEFAULT_SECRET,
 	MAX_REDIRECTS,
 	TokenMinter,
-	getProxySecret,
+	getExplicitSecret,
 	guardedFetch,
 	hostOf,
 	hostPrefix,
@@ -17,9 +18,11 @@ import {
 	looksLikePlaylistType,
 	looksLikePlaylistUrl,
 	mintToken,
+	pickSecret,
 	rewritePlaylist,
 	urlPrefix,
 	verifyToken,
+	type ProxyEnv,
 } from "./proxy.ts";
 
 const SECRET = "unit-test-secret-please-change";
@@ -180,13 +183,28 @@ test("urlPrefix / hostPrefix：目录级与站点级前缀", () => {
 	assert.equal(hostPrefix("https://c.example.com/a/b/c.ts"), "https://c.example.com/");
 });
 
-test("getProxySecret：按 STREAM_SECRET → CRON_SECRET → PASSWORD 顺序回退", () => {
-	assert.equal(getProxySecret({ STREAM_SECRET: "s", CRON_SECRET: "c", PASSWORD: "p" }), "s");
-	assert.equal(getProxySecret({ CRON_SECRET: "c", PASSWORD: "p" }), "c");
-	assert.equal(getProxySecret({ PASSWORD: "p" }), "p");
-	assert.ok(getProxySecret({}).length > 0);
-	assert.equal(isProxySecretWeak({}), true);
-	assert.equal(isProxySecretWeak({ STREAM_SECRET: "s" }), false);
+test("getExplicitSecret：只认 STREAM_SECRET / CRON_SECRET，且不认 PASSWORD", () => {
+	assert.equal(getExplicitSecret({ STREAM_SECRET: "s", CRON_SECRET: "c" }), "s");
+	assert.equal(getExplicitSecret({ CRON_SECRET: "c" }), "c");
+	assert.equal(getExplicitSecret({}), null);
+	// PASSWORD 是后台登录口令，熵低且职责不同，绝不能当作签名密钥 ——
+	// 否则泄漏一个口令就等于泄漏「铸造任意代理令牌」的能力。
+	assert.equal(getExplicitSecret({ PASSWORD: "p" } as unknown as ProxyEnv), null);
+});
+
+test("pickSecret：显式配置 > D1 持久化密钥 > 公开兜底常量", () => {
+	assert.equal(pickSecret("explicit", "persisted"), "explicit");
+	assert.equal(pickSecret(null, "persisted"), "persisted");
+	assert.equal(pickSecret(null, null), INSECURE_DEFAULT_SECRET);
+	assert.equal(pickSecret("", ""), INSECURE_DEFAULT_SECRET);
+});
+
+test("isProxySecretWeak：只有回退到公开常量才算无防护", () => {
+	assert.equal(isProxySecretWeak(INSECURE_DEFAULT_SECRET), true);
+	assert.equal(isProxySecretWeak("a".repeat(64)), false);
+	// 兜底常量必须是「人人可见的固定值」这一事实本身：换个名字并不能让它变安全，
+	// 因此这里断言它与源码中的字面量一致，避免有人误以为改个常量名就加固了。
+	assert.equal(INSECURE_DEFAULT_SECRET, "auroratv-default-insecure-secret");
 });
 
 test("DEFAULT_TOKEN_TTL 为 12 小时", () => {

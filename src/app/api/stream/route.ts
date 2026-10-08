@@ -2,7 +2,6 @@ import { type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import {
 	TokenMinter,
-	getProxySecret,
 	guardedFetch,
 	isLivePlaylist,
 	looksLikePlaylistType,
@@ -10,6 +9,7 @@ import {
 	rewritePlaylist,
 	verifyToken,
 } from "@/lib/proxy";
+import { resolveProxySecret } from "@/lib/secret";
 import { HEADER_LADDER, upstreamHeaders, type HeaderVariant } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
@@ -73,7 +73,7 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	if (!target) return err(400, "missing u");
 
 	const { env } = getCloudflareContext();
-	const secret = getProxySecret(env);
+	const { secret } = await resolveProxySecret(env);
 	const verdict = await verifyToken(secret, token, target);
 	if (!verdict.ok) return err(403, "proxy rejected: " + verdict.reason);
 
