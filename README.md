@@ -106,7 +106,11 @@ npm run cf:deploy
 > 因此不含 Linux 二进制，而 CI 跑在 `ubuntu-latest` 且用 `npm ci` —— 只装锁文件里有的东西，
 > 于是 `opennextjs-cloudflare build` 会以 `Cannot find module '@ast-grep/napi-linux-x64-gnu'` 失败。
 > 提升为根级 `optionalDependencies` 后会被完整写进锁文件，`os`/`cpu` 门控保证各平台只装自己那份。
-> **升级 `next` 或 `@opennextjs/cloudflare` 时，记得同步这里的版本号。**
+>
+> **升级 `next` 时必须同时改三处**：`dependencies.next`、`devDependencies.eslint-config-next`
+> 和这里的 `@next/swc-linux-*`，三者版本号必须完全一致（因此 `next` 用精确版本而非 `^`）。
+> 只升 `next` 而漏掉 swc 钉版，会报 `Mismatching @next/swc version, expected X, got Y`，
+> 且只在 Linux 上暴露。
 
 ### 7. 设置密钥
 
