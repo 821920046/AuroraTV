@@ -10,6 +10,7 @@ import {
 	verifyToken,
 } from "@/lib/proxy";
 import { resolveProxySecret } from "@/lib/secret";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 import { HEADER_LADDER, upstreamHeaders, type HeaderVariant } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
@@ -76,6 +77,12 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	const { secret } = await resolveProxySecret(env);
 	const verdict = await verifyToken(secret, token, target);
 	if (!verdict.ok) return err(403, "proxy rejected: " + verdict.reason);
+
+	// 限流放在签名校验【之后】：无效令牌在上一行就被 403 挡掉了，消耗可忽略；
+	// 这里要约束的是「合法但过量」的流量，也就是真正会打到上游、烧 Worker CPU 的那部分。
+	// 额度按分片粒度定（见 lib/ratelimit.ts 的 RATE_RULES.stream），不是按「操作次数」。
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl, CORS_HEADERS);
 
 	const range = req.headers.get("range");
 	const attempts: Attempt[] = [];

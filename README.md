@@ -161,25 +161,35 @@ npx wrangler deploy
 | --- | --- | --- |
 | GET | `/api/search?kw=` | 聚合搜索，同名影片合并为 `alts` |
 | GET | `/api/detail?source=&id=` | 详情 |
-| GET | `/api/play?source=&id=&ep=` | 播放地址（`url` / `proxy` / `prefer` / `episodes` / `groups`） |
+| GET | `/api/play?source=&id=&ep=` | 播放地址。**只为当前集返回 `url` / `proxy` / `prefer`**，`episodes` 只含集名；切集需带 `ep` 重新请求（命中服务端详情缓存） |
 | GET | `/api/stream?u=&t=` | 流代理，需 HMAC 签名 |
 | GET | `/api/img?u=&t=` | 图片代理，需 HMAC 签名 |
 | GET | `/api/home` | 首页聚合 |
 | GET | `/api/live/channels` · `/api/live/play` · `/api/live/epg` | 直播 |
 | GET/POST | `/api/sources` | 源健康列表 / 播放成败上报 |
 | GET | `/api/cron/health` · `/api/cron/live` | 定时任务，需 `CRON_SECRET` |
-| GET | `/api/health` | 部署自检（密钥来源、D1/KV/鉴权状态），不回显密钥；配了 `USERNAME`/`PASSWORD` 时需 Basic Auth |
+| GET | `/api/health` | 部署自检（密钥来源、D1/KV/鉴权、限流存储、DNS 守卫状态），不回显密钥；配了 `USERNAME`/`PASSWORD` 时需 Basic Auth |
 
 ## 🛡️ 安全设计
 
 - **流代理不开放**：每个代理地址都是 `exp.前缀.HMAC-SHA256`，签名绑定 URL 前缀与过期时间（默认 12h），
   因此一条 500 片的播放列表只需签一次；前缀不匹配 / 过期 / 篡改一律拒绝。
-- **SSRF 防护**：只允许公网 http(s)，拒绝回环、私网、CGNAT、链路本地、云元数据地址。
-  IPv6 按位解析而非字符串前缀比对——`http://[::ffff:127.0.0.1]/` 会被 URL 解析器规范化成
+- **SSRF 防护（两层，逐跳执行）**：
+  第一层 `isSafeUpstream()` 做纯字符串判定——只允许公网 http(s) 与常见端口
+  （`80/443/8080/8443`，用白名单而非穷举危险端口），拒绝回环、私网、CGNAT、链路本地、云元数据地址。
+  IPv6 **按位解析**而非字符串前缀比对——`http://[::ffff:127.0.0.1]/` 会被 URL 解析器规范化成
   `[::ffff:7f00:1]`，只比对 `::1` 的写法会直接漏掉它。
+  第二层 `verifyHost()` 用 DoH 真的解析一次域名，防 DNS rebinding（字符串合法但 A 记录指向内网）。
   取流时**手动跟随重定向并逐跳重新校验**——用 `redirect: "follow"` 的话，
   一个合法公网地址 302 到 `169.254.169.254` 就能绕过全部校验。
-  `/api/stream` 与 `/api/img` 共用同一个 `guardedFetch()`，不存在「修了一个漏了另一个」。
+  `/api/stream` 与 `/api/img` 共用同一个 `guardedFetch()`，IP 判定共用 `lib/ipaddr.ts`，
+  不存在「修了一个漏了另一个」。
+- **应用层限流**：8 个 API 端点各有独立配额，固定窗口计数，只依赖免费的 Cache API
+  （KV 只有 1000 写/天、D1 10 万行写/天，都扛不住「每请求写一次」的负载）。
+  分片级端点（`/api/stream` 600/分、`/api/img` 600/分）的额度刻意远高于操作级端点
+  （`/api/search` 40/分），否则会误杀正常播放。**Cache API 不可用时一律放行**——
+  限流组件故障绝不能让站点不可用。这是兜底层，精确配额仍建议在 Cloudflare 控制台配
+  Rate Limiting Rules（唯一在 Worker 之前生效的一层）。
 - **图片代理有体积上限**（8MB）：海报地址来自第三方接口，不限体积等于开放图床。
   同时不透传上游 `content-length`——Workers 会自动解压并移除 `content-encoding`，
   长度对不上会让浏览器把图片截断。
@@ -192,14 +202,17 @@ npx wrangler deploy
 
 ## ⚠️ 已知限制
 
-1. **未做速率限制**。签名密钥已不可预测（见安全设计），但拿到合法链接的人在有效期内仍可反复请求。
-   单用户场景风险可接受；多用户部署请自行加限流（Cloudflare Rate Limiting Rules 即可）。
+1. **限流是应用层兜底，不是精确配额**。已内置固定窗口限流（见安全设计），但 Cache API 按 colo 隔离、
+   读-改-写有竞态、条目可能被提前驱逐，实际放行数会略高于限额——设计取向是「宁可漏放，不可误杀」。
+   要精确配额请在 Cloudflare 控制台配 Rate Limiting Rules。
 2. **`/api/cron/*` 仍兼容 `?secret=`**（为了不破坏已有部署），但该方式会把密钥写进访问日志，新部署请用 `Authorization: Bearer`。
 3. **代理签名在有效期内可重放**。缩短 `DEFAULT_TOKEN_TTL` 可降低风险，代价是长剧连播中途需重新取地址。
 4. **DRM / 地区封锁的流仍播不了**——属上游策略问题，任何代理都无法解决。
-5. **SSRF 黑名单基于字面地址**，未做 DNS 预解析。逐跳重定向校验 + IPv6 按位判定已覆盖常见绕过路径
-   （含 `::ffff:` 映射回环、NAT64、Teredo、6to4），但不等价于完整防护——若上游域名解析到内网，
-   本层拦不住。生产部署建议再配 Cloudflare 的 egress 策略。
+5. **DNS rebinding 仍有窗口期**。已加 DoH 预解析（见安全设计），但 DoH 解析与实际 `fetch` 解析
+   之间存在时间差，攻击者控制的 DNS 可以「对 DoH 返回公网、对 fetch 返回内网」。
+   这是 DoH 预解析的固有局限，只有运行时的 egress 策略能根治。
+   另：DoH 查询失败时**放行**（fail-open）并打日志——Cloudflare Workers 的网络边界已隔离内网，
+   用「全站播放不可用」去换一个在本平台上本就很难被利用的漏洞，不划算。
 6. **中转视频流的合规风险**：Cloudflare 服务条款 2.8 对大量中转非 HTML 内容（尤其视频）有限制。
    自用请设好 `USERNAME`/`PASSWORD`/`STREAM_SECRET`，并控制使用规模。
 7. **签名密钥的兜底状态需自查**：若 `AURORA_DB` 未绑定或迁移未执行，`/api/health` 会显示

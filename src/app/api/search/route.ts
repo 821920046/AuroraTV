@@ -6,6 +6,7 @@ import { getSourceHealthMap } from "@/lib/db";
 import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
 import { TokenMinter } from "@/lib/proxy";
 import { resolveProxySecret } from "@/lib/secret";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,11 @@ export async function GET(req: NextRequest) {
 	if (!kw) return NextResponse.json({ code: 400, msg: "请输入关键词", list: [] }, { status: 200 });
 	if (kw.length > 60)
 		return NextResponse.json({ code: 400, msg: "关键词过长", list: [] }, { status: 200 });
+
+	// 搜索是最贵的端点：一次请求会扇出到 8 个上游。放在参数校验之后、
+	// 任何上游调用之前 —— 限流的意义就是不让请求走到 fetchJson。
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
 
 	try {
 		const { env } = getCloudflareContext();

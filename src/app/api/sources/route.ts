@@ -2,10 +2,14 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getSourceHealthMap } from "@/lib/db";
 import { getEnabledSources } from "@/lib/sources";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
+
 	const { env } = getCloudflareContext();
 	const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : {};
 	const sources = await getEnabledSources(env.AURORA_DB);
@@ -25,6 +29,9 @@ export async function GET() {
 // 原因：KV 免费版每天只有 1000 次写，每次播放失败都写一条，很容易把配额烧光，
 // 连带影响首页/搜索缓存写入；而且旧实现只记失败不记成功，无法算真实成功率。
 export async function POST(req: NextRequest) {
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
+
 	const { env } = getCloudflareContext();
 	const body = (await req.json().catch(() => ({}))) as {
 		source_id?: string;

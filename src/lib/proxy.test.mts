@@ -1,6 +1,11 @@
-// 流代理的零依赖单测：SSRF 白/黑名单、HMAC 令牌、m3u8 改写。
-// proxy.ts 不 import 任何模块，因此可被 Node 直接加载执行。
+// 流代理的单测：SSRF 白/黑名单、端口白名单、DNS 预解析注入、HMAC 令牌、m3u8 改写。
+//
+// proxy.ts 只 import 同目录下两个零依赖模块（ipaddr.ts / dnsguard.ts），
+// 整条链不碰外部包、不碰 tsconfig 的 paths 别名，因此可被 Node 直接加载执行。
 // 运行：npm test
+//
+// 注意：guardedFetch 默认会做 DoH 预解析，单测必须传 verifyHost: null 关掉它 ——
+// 否则每个用例都会真的去查一次外网，测试变慢、变脆且依赖网络。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -323,7 +328,7 @@ test("hostOf：保留端口，非法 URL 回退", () => {
 test("guardedFetch：直连成功时只发一次 manual 请求", async () => {
 	const calls: Call[] = [];
 	const f = fakeFetch({ "https://cdn.example.com/a.m3u8": () => okBody("hello") }, calls);
-	const r = await guardedFetch("https://cdn.example.com/a.m3u8", { fetcher: f });
+	const r = await guardedFetch("https://cdn.example.com/a.m3u8", { fetcher: f, verifyHost: null });
 	assert.equal(r.ok, true);
 	if (r.ok) {
 		assert.equal(r.finalUrl, "https://cdn.example.com/a.m3u8");
@@ -342,7 +347,7 @@ test("guardedFetch：跟随公网 -> 公网重定向，finalUrl 为最终落点"
 		},
 		calls,
 	);
-	const r = await guardedFetch("https://a.example.com/1.m3u8", { fetcher: f });
+	const r = await guardedFetch("https://a.example.com/1.m3u8", { fetcher: f, verifyHost: null });
 	assert.equal(r.ok, true);
 	if (r.ok) assert.equal(r.finalUrl, "https://b.example.com/2.m3u8");
 	assert.deepEqual(
@@ -361,7 +366,7 @@ test("guardedFetch：公网 302 到内网必须拦下，且内网地址一次都
 	]) {
 		const calls: Call[] = [];
 		const f = fakeFetch({ "https://evil.example.com/r": () => redirectTo(evil) }, calls);
-		const r = await guardedFetch("https://evil.example.com/r", { fetcher: f });
+		const r = await guardedFetch("https://evil.example.com/r", { fetcher: f, verifyHost: null });
 		assert.equal(r.ok, false, evil);
 		if (!r.ok) assert.match(r.error, /blocked upstream/, evil);
 		// 最关键的断言：危险地址从未被真正请求
@@ -379,7 +384,7 @@ test("guardedFetch：支持相对 Location", async () => {
 		},
 		calls,
 	);
-	const r = await guardedFetch("https://a.example.com/dir/1.m3u8", { fetcher: f });
+	const r = await guardedFetch("https://a.example.com/dir/1.m3u8", { fetcher: f, verifyHost: null });
 	assert.equal(r.ok, true);
 	if (r.ok) assert.equal(r.finalUrl, "https://a.example.com/dir/2.m3u8");
 });
@@ -395,6 +400,7 @@ test("guardedFetch：请求头按每一跳的域名重新生成", async () => {
 	);
 	await guardedFetch("https://a.example.com/1", {
 		fetcher: f,
+		verifyHost: null,
 		headers: (u) => ({ referer: new URL(u).origin + "/" }),
 	});
 	assert.equal(calls[0].headers?.referer, "https://a.example.com/");
@@ -408,7 +414,7 @@ test("guardedFetch：重定向次数超过上限即报错", async () => {
 		script["https://a.example.com/" + i] = () => redirectTo("https://a.example.com/" + (i + 1));
 	}
 	const f = fakeFetch(script, calls);
-	const r = await guardedFetch("https://a.example.com/0", { fetcher: f });
+	const r = await guardedFetch("https://a.example.com/0", { fetcher: f, verifyHost: null });
 	assert.equal(r.ok, false);
 	if (!r.ok) assert.match(r.error, /too many redirects/);
 	assert.equal(calls.length, MAX_REDIRECTS + 1);
@@ -417,7 +423,7 @@ test("guardedFetch：重定向次数超过上限即报错", async () => {
 test("guardedFetch：3xx 缺少 Location 时报错", async () => {
 	const calls: Call[] = [];
 	const f = fakeFetch({ "https://a.example.com/x": () => new Response(null, { status: 302 }) }, calls);
-	const r = await guardedFetch("https://a.example.com/x", { fetcher: f });
+	const r = await guardedFetch("https://a.example.com/x", { fetcher: f, verifyHost: null });
 	assert.equal(r.ok, false);
 	if (!r.ok) assert.match(r.error, /redirect without location/);
 });
@@ -426,7 +432,7 @@ test("guardedFetch：起始地址本身就是内网时一次请求都不发", as
 	const calls: Call[] = [];
 	const f = fakeFetch({}, calls);
 	for (const bad of ["http://169.254.169.254/", "http://127.0.0.1/", "file:///etc/passwd", "not a url"]) {
-		const r = await guardedFetch(bad, { fetcher: f });
+		const r = await guardedFetch(bad, { fetcher: f, verifyHost: null });
 		assert.equal(r.ok, false, bad);
 	}
 	assert.equal(calls.length, 0);
@@ -443,7 +449,7 @@ test("guardedFetch：遇到 opaqueredirect 时退回 follow，并校验最终落
 		return { status: 0, type: "opaqueredirect" } as unknown as Response;
 	}) as unknown as typeof fetch;
 
-	const r = await guardedFetch("https://evil.example.com/r", { fetcher: f });
+	const r = await guardedFetch("https://evil.example.com/r", { fetcher: f, verifyHost: null });
 	assert.equal(r.ok, false);
 	if (!r.ok) assert.match(r.error, /blocked redirect target/);
 });
@@ -458,7 +464,88 @@ test("guardedFetch：opaqueredirect 落到公网地址时放行", async () => {
 		return { status: 0, type: "opaqueredirect" } as unknown as Response;
 	}) as unknown as typeof fetch;
 
-	const r = await guardedFetch("https://evil.example.com/r", { fetcher: f });
+	const r = await guardedFetch("https://evil.example.com/r", { fetcher: f, verifyHost: null });
 	assert.equal(r.ok, true);
 	if (r.ok) assert.equal(r.finalUrl, "https://cdn.example.com/final.m3u8");
+});
+
+// ---------------------------------------------------------------- 端口白名单
+
+test("isSafeUpstream：放行默认端口与常见备用端口", () => {
+	// 默认端口在 WHATWG URL 里会被规范化成空串，必须显式列进白名单
+	assert.equal(isSafeUpstream("https://cdn.example.com/a.m3u8"), true);
+	assert.equal(isSafeUpstream("https://cdn.example.com:443/a.m3u8"), true);
+	assert.equal(isSafeUpstream("http://cdn.example.com:80/a.ts"), true);
+	assert.equal(isSafeUpstream("http://cdn.example.com:8080/a.ts"), true);
+	assert.equal(isSafeUpstream("https://cdn.example.com:8443/a.ts"), true);
+});
+
+test("isSafeUpstream：拒绝非白名单端口（堵死内网端口探测）", () => {
+	for (const bad of [
+		"http://cdn.example.com:22/",
+		"http://cdn.example.com:3306/",
+		"http://cdn.example.com:6379/",
+		"http://cdn.example.com:9200/",
+		"https://cdn.example.com:9000/",
+	]) {
+		assert.equal(isSafeUpstream(bad), false, bad);
+	}
+});
+
+test("isSafeUpstream：某段超过 255 的伪 IPv4 按拒绝处理", () => {
+	// WHATWG URL 会把这种输入退化成「域名」，随后解析必然失败；
+	// 显式拒绝比依赖「反正也连不上」更明确。
+	assert.equal(isSafeUpstream("http://999.1.1.1/"), false);
+	assert.equal(isSafeUpstream("http://1.2.3.999/"), false);
+});
+
+// ---------------------------------------------------------------- DNS 预解析
+
+test("guardedFetch：注入的 verifyHost 逐跳调用，判为危险时在发请求前拦下", async () => {
+	const calls: Call[] = [];
+	const f = fakeFetch(
+		{
+			"https://a.example.com/1": () => redirectTo("https://b.example.com/2"),
+			"https://b.example.com/2": () => okBody("x"),
+		},
+		calls,
+	);
+	const seen: string[] = [];
+	const r = await guardedFetch("https://a.example.com/1", {
+		fetcher: f,
+		verifyHost: async (h) => {
+			seen.push(h);
+			return h !== "b.example.com"; // 第二跳的域名被判为危险
+		},
+	});
+	assert.equal(r.ok, false);
+	if (!r.ok) assert.match(r.error, /blocked upstream \(dns\)/);
+	// 两跳的域名都被校验过，但第二个危险地址一次都没被真正请求
+	assert.deepEqual(seen, ["a.example.com", "b.example.com"]);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].url, "https://a.example.com/1");
+});
+
+test("guardedFetch：verifyHost 收到的是纯主机名（无端口、无方括号）", async () => {
+	const calls: Call[] = [];
+	const f = fakeFetch({ "https://a.example.com:8443/x": () => okBody("x") }, calls);
+	const seen: string[] = [];
+	await guardedFetch("https://a.example.com:8443/x", {
+		fetcher: f,
+		verifyHost: async (h) => {
+			seen.push(h);
+			return true;
+		},
+	});
+	assert.deepEqual(seen, ["a.example.com"]);
+});
+
+test("guardedFetch：默认即启用 DNS 校验，IP 字面量会被短路跳过", async () => {
+	// 这条刻意不传 verifyHost，用来锁住「默认是开启的」这个行为。
+	// 用 IP 字面量是为了让 dnsguard 直接短路返回，全程不产生任何网络请求。
+	const calls: Call[] = [];
+	const f = fakeFetch({ "http://1.1.1.1/x.ts": () => okBody("x") }, calls);
+	const r = await guardedFetch("http://1.1.1.1/x.ts", { fetcher: f });
+	assert.equal(r.ok, true);
+	assert.equal(calls.length, 1);
 });

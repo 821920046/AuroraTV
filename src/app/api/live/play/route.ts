@@ -3,12 +3,16 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getChannel } from "@/lib/live";
 import { TokenMinter } from "@/lib/proxy";
 import { resolveProxySecret } from "@/lib/secret";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
 // 直播源几乎全部是 http + 无 CORS，https 页面下无一例外地被浏览器拦截。
 // 因此同样返回双地址，并默认建议走同源代理。
 export async function GET(req: NextRequest) {
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
+
 	const id = req.nextUrl.searchParams.get("id");
 	if (!id) return NextResponse.json({ code: 400, msg: "missing id" }, { status: 200 });
 

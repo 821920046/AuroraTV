@@ -4,6 +4,7 @@ import { getChannels, getChannelGroups, getChannelsVersion } from "@/lib/live";
 import { cacheGet, cacheSet, makeCacheKey } from "@/lib/cache";
 import { TokenMinter } from "@/lib/proxy";
 import { resolveProxySecret } from "@/lib/secret";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,9 @@ export const dynamic = "force-dynamic";
 type ChannelRow = { logo?: string | null; [k: string]: unknown };
 
 export async function GET(req: NextRequest) {
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
+
 	const { env } = getCloudflareContext();
 	if (!env.AURORA_DB) return NextResponse.json({ code: 200, channels: [], groups: [] });
 	const group = req.nextUrl.searchParams.get("group")?.trim() || undefined;

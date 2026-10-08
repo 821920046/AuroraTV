@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { aggregateRecent, type RecentItem } from "@/lib/aggregator";
 import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
@@ -6,6 +6,7 @@ import { getSourceHealthMap } from "@/lib/db";
 import { getEnabledSources } from "@/lib/sources";
 import { TokenMinter } from "@/lib/proxy";
 import { resolveProxySecret } from "@/lib/secret";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,10 @@ async function withProxiedPosters(items: RecentItem[], minter: TokenMinter) {
 	);
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
+
 	try {
 		const { env } = getCloudflareContext();
 		const key = makeCacheKey("home", "v2");

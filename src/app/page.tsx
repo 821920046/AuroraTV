@@ -27,7 +27,12 @@ type Item = {
 	alts?: Array<{ source_id: string; source_name?: string; vod_id: string }>;
 };
 
-type Episode = { name: string; url: string; proxy: string; prefer: "direct" | "proxy" };
+/**
+ * 剧集条目【只有名字】。
+ * 地址只对「当前这一集」在顶层给一份（url / proxy / prefer）——
+ * 100 集的剧不再一次回传 200 个 URL，切集时带 ep 重新请求，命中服务端详情缓存。
+ */
+type Episode = { name: string };
 
 type PlayData = {
 	code: number;
@@ -43,6 +48,12 @@ type PlayData = {
 	group: number;
 	groups: Array<{ index: number; from: string; count: number }>;
 	ep: number;
+	/** 当前集的上游原地址 */
+	url: string;
+	/** 当前集的同源签名代理地址 */
+	proxy: string;
+	/** 服务端建议的首选线路 */
+	prefer: "direct" | "proxy";
 	episodes: Episode[];
 };
 
@@ -118,6 +129,12 @@ export default function HomePage() {
 	const [playLoading, setPlayLoading] = useState(false);
 	const [playMsg, setPlayMsg] = useState("");
 	const [selected, setSelected] = useState<Item | null>(null);
+	/**
+	 * 正在加载的集号。
+	 * 切集要走一次网络，而 play.ep 要等数据回来才变 —— 没有它，选集网格上的
+	 * 高亮会「滞后一拍」，用户点了第 5 集却看到第 3 集还亮着。
+	 */
+	const [pendingEp, setPendingEp] = useState<number | null>(null);
 
 	const [history, setHistory] = useState<HistoryEntry[]>([]);
 	const [resumeAt, setResumeAt] = useState(0);
@@ -126,6 +143,8 @@ export default function HomePage() {
 	const playAbort = useRef<AbortController | null>(null);
 	const playerBox = useRef<HTMLDivElement | null>(null);
 	const epBox = useRef<HTMLDivElement | null>(null);
+	/** 读「是否已经打开过片子」，避免把 play 塞进 openPlay 的依赖里 */
+	const playRef = useRef<PlayData | null>(null);
 
 	useEffect(() => setHistory(loadHistory()), []);
 
@@ -171,9 +190,12 @@ export default function HomePage() {
 		const ctrl = new AbortController();
 		playAbort.current = ctrl;
 		setSelected(item);
-		setPlayLoading(true);
 		setPlayMsg("");
 		setResumeAt(startAt);
+		// 首次打开才显示骨架屏。切集/换源时保留当前播放器直到新地址到达 ——
+		// 否则每换一集画面都会闪一下骨架，观感上比多等 200ms 差得多。
+		if (playRef.current) setPendingEp(ep);
+		else setPlayLoading(true);
 		try {
 			const qs = new URLSearchParams({
 				source: item.source_id,
@@ -193,11 +215,21 @@ export default function HomePage() {
 		} catch (e) {
 			if ((e as Error).name !== "AbortError") setPlayMsg("网络错误，获取播放地址失败");
 		} finally {
-			if (playAbort.current === ctrl) setPlayLoading(false);
+			if (playAbort.current === ctrl) {
+				setPlayLoading(false);
+				setPendingEp(null);
+			}
 		}
 	}, []);
 
-	const current = play?.episodes?.[play.ep];
+	useEffect(() => {
+		playRef.current = play;
+	}, [play]);
+
+	/** 地址来自顶层（只有当前集有），集名从 episodes 取 */
+	const epName = play?.episodes[play.ep]?.name ?? "";
+	/** 选集网格的高亮位置：优先显示「正在加载的那一集」 */
+	const activeEp = pendingEp ?? play?.ep ?? 0;
 
 	// 换集后把当前集滚进视野。
 	// 只在「确实不在可视区内」时才滚，否则每次换集都会把页面顶一下。
@@ -241,10 +273,11 @@ export default function HomePage() {
 			if (!play || !selected) return;
 			const next = play.ep + delta;
 			if (next < 0 || next >= play.episodes.length) return;
-			setPlay({ ...play, ep: next });
-			setResumeAt(0);
+			// 不能再用 setPlay({...play, ep: next}) 本地改状态了：
+			// 地址现在只对「当前集」下发，换集必须真的去服务端取一次新地址。
+			void openPlay(selected, next, play.group, 0);
 		},
-		[play, selected],
+		[play, selected, openPlay],
 	);
 
 	const altSources = useMemo(() => {
@@ -364,15 +397,15 @@ export default function HomePage() {
 							</div>
 						)}
 
-						{!playLoading && play && current && (
+						{!playLoading && play && (
 							<>
 								<Player
-									key={play.source_id + ":" + play.ep + ":" + current.url}
-									url={current.url}
-									proxyUrl={current.proxy}
-									prefer={current.prefer}
+									key={play.source_id + ":" + play.ep + ":" + play.url}
+									url={play.url}
+									proxyUrl={play.proxy}
+									prefer={play.prefer}
 									poster={play.pic ?? undefined}
-									title={play.title + " " + (current.name ?? "")}
+									title={play.title + " " + epName}
 									sourceId={play.source_id}
 									startTime={resumeAt}
 									onProgress={recordProgress}
@@ -396,7 +429,7 @@ export default function HomePage() {
 											{play.area ? <span className="tag">{play.area}</span> : null}
 											<span className="tag">{play.source_name ?? play.source_id}</span>
 											<span className="tag">
-												第 {play.ep + 1} / {play.episodes.length} 集
+												第 {activeEp + 1} / {play.episodes.length} 集
 											</span>
 										</div>
 										{play.actor ? (
@@ -463,13 +496,13 @@ export default function HomePage() {
 											<button
 												type="button"
 												key={i}
-												data-current={i === play.ep ? "1" : undefined}
-												className={"ep-btn" + (i === play.ep ? " is-current" : "")}
-												aria-current={i === play.ep ? "true" : undefined}
+												data-current={i === activeEp ? "1" : undefined}
+												className={"ep-btn" + (i === activeEp ? " is-current" : "")}
+												aria-current={i === activeEp ? "true" : undefined}
 												title={e.name}
 												onClick={() => {
-													setResumeAt(0);
-													setPlay({ ...play, ep: i });
+													if (!selected || i === play.ep) return;
+													void openPlay(selected, i, play.group, 0);
 												}}
 											>
 												{e.name}

@@ -3,6 +3,7 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fetchDetail } from "@/lib/aggregator";
 import { cacheGetWithKv, cacheSetWithKv, makeCacheKey } from "@/lib/cache";
 import { getEnabledSources } from "@/lib/sources";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,9 @@ export async function GET(req: NextRequest) {
 	const vodId = req.nextUrl.searchParams.get("id");
 	if (!sourceId || !vodId)
 		return NextResponse.json({ code: 400, msg: "missing source/id" }, { status: 400 });
+
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
 
 	const { env } = getCloudflareContext();
 	const key = makeCacheKey("detail", `${sourceId}:${vodId}`);

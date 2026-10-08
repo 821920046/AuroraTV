@@ -2,11 +2,15 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getEpgNowNext } from "@/lib/live";
 import { cacheGet, cacheSet, makeCacheKey } from "@/lib/cache";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
 // 返回某频道「正在播 / 稍后播」。无 EPG 数据时优雅返回空。
 export async function GET(req: NextRequest) {
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl);
+
 	const epgId = req.nextUrl.searchParams.get("epgId")?.trim();
 	if (!epgId) return NextResponse.json({ code: 400, msg: "missing epgId" }, { status: 400 });
 

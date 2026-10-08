@@ -14,7 +14,16 @@
 // 并把 m3u8 里的所有子地址（分片 / 密钥 / 多码率子列表）改写成同样走代理的地址。
 // 为了不变成开放代理（SSRF / 被人当图床和流量中转），所有代理地址都必须带
 // HMAC-SHA256 签名，且签名绑定「URL 前缀 + 过期时间」，一条播放列表只需签一次。
+//
+// 【关于 import】
+// 本模块只 import 同目录下两个同样零依赖的模块（ipaddr / dnsguard），
+// 它们自身不 import 任何东西，因此整条依赖链仍可被 Node 测试运行器直接加载。
+// 任何引入外部包或 `@/lib/*` 别名的改动都会破坏 src/lib/proxy.test.mts，
+// 这是刻意维持的约束，不是疏忽。
 // ============================================================================
+
+import { blockedIpLiteral } from "./ipaddr.ts";
+import { verifyHostResolvesPublic } from "./dnsguard.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -119,88 +128,25 @@ function safeEqual(a: string, b: string): boolean {
 // ---------------------------------------------------------------- SSRF 防护
 
 /**
- * IPv4 是否属于「公网可路由」。
- * 与 WHATWG URL 解析器配合：`http://0x7f000001/`、`http://2130706433/`、
- * `http://0177.0.0.1/` 这类八进制/十六进制/整数写法都会被规范化成点分十进制，
- * 因此这里只需处理点分十进制。
- */
-function isPublicIpv4(a: number, b: number): boolean {
-	if (a === 0 || a === 10 || a === 127) return false; // 未指定 / 私网 / 回环
-	if (a === 169 && b === 254) return false; // 链路本地，含云元数据 169.254.169.254
-	if (a === 172 && b >= 16 && b <= 31) return false; // 私网
-	if (a === 192 && b === 168) return false; // 私网
-	if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
-	if (a === 192 && b === 0) return false; // 192.0.0.0/24 协议保留
-	if (a === 198 && (b === 18 || b === 19)) return false; // 基准测试
-	if (a >= 224) return false; // 组播 / 保留 / 广播
-	return true;
-}
-
-/**
- * 把 IPv6 字面量（不含方括号）解析成 8 个 16 位分组。
+ * 允许代理的上游端口。
  *
- * 【为什么必须按位解析，而不是正则匹配字符串】
- * `http://[::ffff:127.0.0.1]/` 会被 WHATWG URL 解析器规范化成 `[::ffff:7f00:1]`。
- * 旧实现只比对 `::1` / `fc00::/7` / `fe80::` 三个字符串前缀，
- * `::ffff:7f00:1` 一个都不命中 —— 于是「回环地址」被判定为安全，
- * 重定向到内网也就绕过了整层 SSRF 防护。按位展开后这类地址无从隐藏。
+ * 【为什么是白名单而不是黑名单】
+ * 危险端口有 65535 个，黑名单要穷举它们 —— 漏一个是必然的，而且新端口随时会出现。
+ * 反过来，采集站的流地址实际上只用 80/443，8080/8443 留作余量。白名单只要 5 项就够。
+ *
+ * 空字符串代表 URL 的默认端口：WHATWG URL 会把 `http://x.com:80/` 规范化成
+ * `http://x.com/`（port 为 ""），所以默认端口必须显式列进来。
+ *
+ * 附带的收益：把「用代理探测内网某端口是否开放」这条路一并封死。
  */
-function parseIpv6(host: string): number[] | null {
-	const h = host.split("%")[0]; // 去掉 zone id（fe80::1%eth0）
-	const halves = h.split("::");
-	if (halves.length > 2) return null;
-
-	const parseParts = (parts: string[]): number[] | null => {
-		const out: number[] = [];
-		for (const p of parts) {
-			if (/^\d{1,3}(\.\d{1,3}){3}$/.test(p)) {
-				// 尾部内嵌的 IPv4（::ffff:127.0.0.1）
-				const v4 = p.split(".").map(Number);
-				if (v4.some((n) => n > 255)) return null;
-				out.push(((v4[0] << 8) | v4[1]) & 0xffff, ((v4[2] << 8) | v4[3]) & 0xffff);
-				continue;
-			}
-			if (!/^[0-9a-f]{1,4}$/.test(p)) return null;
-			out.push(parseInt(p, 16));
-		}
-		return out;
-	};
-
-	const head = parseParts(halves[0] ? halves[0].split(":") : []);
-	const tail = parseParts(halves.length === 2 && halves[1] ? halves[1].split(":") : []);
-	if (!head || !tail) return null;
-	if (halves.length === 1) return head.length === 8 ? head : null;
-	const fill = 8 - head.length - tail.length;
-	if (fill < 0) return null;
-	return [...head, ...new Array<number>(fill).fill(0), ...tail];
-}
-
-/** IPv6 是否属于「不可路由到公网」的地址段。解析失败一律视为危险。 */
-function isBlockedIpv6(host: string): boolean {
-	const g = parseIpv6(host);
-	if (!g) return true;
-	const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
-
-	if (zero(0, 8)) return true; // :: 未指定
-	if (zero(0, 7) && g[7] === 1) return true; // ::1 回环
-	// IPv4 映射 ::ffff:0:0/96 与 IPv4 兼容 ::/96（已废弃）—— 一律由内嵌的 v4 决定。
-	// `::` 与 `::1` 已在上面被拦截，不会走到这里。
-	// 内嵌 v4 的前两段落在 g[6]：高字节 = 第一段，低字节 = 第二段。
-	if (zero(0, 5) && (g[5] === 0xffff || g[5] === 0)) {
-		return !isPublicIpv4(g[6] >> 8, g[6] & 0xff);
-	}
-	if ((g[0] & 0xfe00) === 0xfc00) return true; // ULA fc00::/7
-	if ((g[0] & 0xffc0) === 0xfe80) return true; // 链路本地 fe80::/10
-	if ((g[0] & 0xff00) === 0xff00) return true; // 组播 ff00::/8
-	if (g[0] === 0x64 && g[1] === 0xff9b) return true; // NAT64 64:ff9b::/96
-	if (g[0] === 0x2001 && g[1] === 0x0000) return true; // Teredo 2001::/32
-	if (g[0] === 0x2002) return !isPublicIpv4(g[1] >> 8, g[1] & 0xff); // 6to4 内嵌 v4
-	return false;
-}
+const ALLOWED_PORTS = new Set(["", "80", "443", "8080", "8443"]);
 
 /**
- * 只允许公网 http(s)。内网 / 回环 / 链路本地 / 云元数据地址一律拒绝，
+ * 只允许公网 http(s) 的常见端口。内网 / 回环 / 链路本地 / 云元数据地址一律拒绝，
  * 避免代理被用来探测 Cloudflare 内部或用户自建网络。
+ *
+ * IP 字面量的判定委托给 lib/ipaddr.ts —— 与 DNS 预解析共用同一份实现，
+ * 不会再出现「一处修好、另一处漏掉」。
  */
 export function isSafeUpstream(raw: string): boolean {
 	let u: URL;
@@ -210,6 +156,7 @@ export function isSafeUpstream(raw: string): boolean {
 		return false;
 	}
 	if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+	if (!ALLOWED_PORTS.has(u.port)) return false;
 
 	const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 	if (!host) return false;
@@ -222,15 +169,10 @@ export function isSafeUpstream(raw: string): boolean {
 	)
 		return false;
 
-	// 含冒号 => IPv6 字面量（主机名不允许出现冒号），交给按位解析
-	if (host.includes(":")) return !isBlockedIpv6(host);
-
-	const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-	if (m) {
-		const octets = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
-		if (octets.some((n) => n > 255)) return false;
-		return isPublicIpv4(octets[0], octets[1]);
-	}
+	// blocked === null 表示「这不是 IP 字面量」，也就是普通域名：
+	// 字面量层面无可判定，交给 dnsguard 的预解析去查它到底指向哪里。
+	const blocked = blockedIpLiteral(host);
+	if (blocked !== null) return !blocked;
 	return true;
 }
 
@@ -250,6 +192,14 @@ export type GuardedFetchOptions = {
 	cf?: Record<string, unknown>;
 	/** 便于单测注入；生产环境用全局 fetch */
 	fetcher?: typeof fetch;
+	/**
+	 * 主机名解析校验，逐跳执行。
+	 *
+	 * 缺省使用 dnsguard 的 DoH 预解析（DNS rebinding 纵深防御）。
+	 * 单测**必须显式传 null**：否则每个用例都会真的去查一次外网 DoH，
+	 * 测试会变慢、变脆，还会依赖网络。
+	 */
+	verifyHost?: ((host: string) => Promise<boolean>) | null;
 };
 
 export type GuardedFetchResult =
@@ -261,6 +211,15 @@ export function hostOf(raw: string): string {
 		return new URL(raw).host;
 	} catch {
 		return "invalid-url";
+	}
+}
+
+/** 只取主机名（去掉端口与 IPv6 方括号），供 DNS 校验使用。 */
+function hostnameOf(raw: string): string {
+	try {
+		return new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	} catch {
+		return "";
 	}
 }
 
@@ -286,6 +245,12 @@ async function cancelBody(res: Response): Promise<void> {
  * 而浏览器语义会返回 opaqueredirect（status 0、响应头不可读）。
  * 万一落到后者，就退回 `follow`，但事后用 `res.url` 校验最终落点 ——
  * 宁可校验得晚一点，也不能让重定向把 SSRF 防护整个绕过去。
+ *
+ * 【两层校验，逐跳都做】
+ *   第一层 isSafeUpstream：纯字符串判定，零成本。管住「URL 里直接写内网 IP」
+ *     以及「重定向到内网 IP」，包括 `[::ffff:7f00:1]` 这类被 URL 解析器规范化过的形式。
+ *   第二层 verifyHost：域名必须真的解析一次，管住「域名指向内网」的 DNS rebinding。
+ *     它有一次子请求开销，所以 dnsguard 里做了 isolate 内存 + 边缘两级缓存。
  */
 export async function guardedFetch(
 	target: string,
@@ -293,6 +258,8 @@ export async function guardedFetch(
 ): Promise<GuardedFetchResult> {
 	const doFetch = opts.fetcher ?? fetch;
 	const method = opts.method ?? "GET";
+	// undefined = 用默认实现；null = 显式关闭（单测）；函数 = 注入
+	const verifyHost = opts.verifyHost === undefined ? verifyHostResolvesPublic : opts.verifyHost;
 	const headersFor = (u: string): Record<string, string> | undefined =>
 		typeof opts.headers === "function" ? opts.headers(u) : opts.headers;
 	const baseInit = {
@@ -304,6 +271,17 @@ export async function guardedFetch(
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
 		if (!isSafeUpstream(url)) {
 			return { ok: false, error: `blocked upstream after ${hop} redirect(s): ${hostOf(url)}` };
+		}
+		// 静态校验只看得懂字面量。`https://evil.example.com/x` 这个字符串本身完全合法，
+		// 但它的 A 记录可以指向 127.0.0.1 —— 也就是 DNS rebinding，只能真的解析一次。
+		if (verifyHost) {
+			const host = hostnameOf(url);
+			if (!host || !(await verifyHost(host))) {
+				return {
+					ok: false,
+					error: `blocked upstream (dns) after ${hop} redirect(s): ${hostOf(url)}`,
+				};
+			}
 		}
 		const res = await doFetch(url, {
 			...baseInit,
@@ -320,6 +298,17 @@ export async function guardedFetch(
 			if (!isSafeUpstream(followed.url)) {
 				await cancelBody(followed);
 				return { ok: false, error: `blocked redirect target: ${hostOf(followed.url)}` };
+			}
+			// 这条路径是「事后校验」，落点已经真的被请求过了，所以第二层更不能省。
+			if (verifyHost) {
+				const finalHost = hostnameOf(followed.url);
+				if (!finalHost || !(await verifyHost(finalHost))) {
+					await cancelBody(followed);
+					return {
+						ok: false,
+						error: `blocked redirect target (dns): ${hostOf(followed.url)}`,
+					};
+				}
 			}
 			return { ok: true, res: followed, finalUrl: followed.url };
 		}

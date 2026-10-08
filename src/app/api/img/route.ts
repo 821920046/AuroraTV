@@ -2,6 +2,7 @@ import { type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { guardedFetch, verifyToken } from "@/lib/proxy";
 import { resolveProxySecret } from "@/lib/secret";
+import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 import { upstreamHeaders } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
@@ -80,6 +81,10 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	const { secret } = await resolveProxySecret(env);
 	const verdict = await verifyToken(secret, token, target);
 	if (!verdict.ok) return err(403, "img proxy rejected: " + verdict.reason);
+
+	// 与 /api/stream 同理：校验之后再限流，且额度按「一个搜索页并发百来张海报」来定。
+	const rl = await checkRateLimit(req);
+	if (rl.limited) return rateLimitedResponse(rl, HEADERS);
 
 	const got = await guardedFetch(target, {
 		method,
