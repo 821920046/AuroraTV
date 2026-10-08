@@ -81,11 +81,37 @@ return after?.value ?? null;   // 回读，而不是 return makeValue()
 立即失效」——两件事的轮换周期完全不同。最关键的是，`PASSWORD` 泄漏后攻击者拿到的不只是后台，
 还有「铸造任意代理令牌」的能力。签名只认专用密钥。
 
+### 升级影响（一次性、可自愈）
+
+升级后**已经发出的播放链接会全部失效一次**，表现为「点播放报 403，刷新页面就好」。原因：
+
+- 以前用 `PASSWORD` 或公开常量签发的令牌，现在校验时用的是新的 D1 密钥 → 签名对不上；
+- 但 `/api/play`、`/api/home`、`/api/search` 每次都会重新签发，用户刷新页面即可恢复。
+
+也就是说：**不需要任何人工操作**，也没有数据迁移。若想完全避免这次抖动，
+在部署前 `npx wrangler secret put STREAM_SECRET` 设一个固定值即可（那样就永远不依赖 D1 密钥）。
+
+`migrations/0008_settings.sql` 由 CI 的 `wrangler d1 migrations apply --remote` 自动执行，
+不需要手动跑。
+
 ### 验证
 
 - `npm run typecheck` ✅ / `npm run lint` ✅（0 warning）
-- `npm test` ✅ **43 项全过**（v0.4.0 为 36 项；新增 `db.test.mts` 5 项 + 密钥优先级 3 项，改写 1 项）
+- `npm test` ✅ **52 项全过**（v0.4.0 为 36 项）：
+  `proxy.test.mts` 38 项（原 36，密钥断言改写为 3 条新用例）+
+  `db.test.mts` 5 项（含一条复现多 isolate 竞态的用例）+
+  `secret.test.mts` 9 项（优先级 / 兜底 / 缓存）
 - `npx next build` ✅ / `npx opennextjs-cloudflare build` ✅
+- **CI run `37775407174` 全绿**：`verify ✓` / `deploy ✓ 1m2s`，
+  其中 `Apply D1 migrations (remote) ✓` 说明 `app_setting` 表已在远程 D1 建好，
+  Worker 已发布到 `https://auroratv.weiw55016.workers.dev`
+- 反向核对：`proxy_secret`、`app_setting`、`ON CONFLICT(key) DO NOTHING`、
+  `代理签名密钥回退到公开常量` 等新字符串确实出现在 `.open-next` 产物里
+  （`server-functions/default/.next/server/chunks/*.js`），排除「本地改了但没打进包」
+
+> 本机沙箱到 `*.workers.dev` 的出网被拦（代理返回 502 CONNECT），
+> 因此**未能**在本地对线上 `/api/health` 做端到端断言。若要自查，部署后访问
+> `GET https://<你的域名>/api/health`，正常应看到 `"secret":{"source":"d1","weak":false}`。
 
 ## 零、【最严重】上一轮的 CI 其实是失败的 —— 锁文件不跨平台
 
