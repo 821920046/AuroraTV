@@ -32,6 +32,17 @@ export type PlayerProps = {
 	onProgress?: (currentTime: number, duration: number) => void;
 	onNext?: () => void;
 	onPrev?: () => void;
+	/**
+	 * 所有候选线路都失败时调用（代理 + 直连都试过了）。
+	 *
+	 * 返回 true 表示「外部已接管」—— 通常是自动切换到另一个片源重试。
+	 * 此时播放器**不能**再显示失败页：否则用户会看到失败页一闪，紧接着画面又出来了，
+	 * 观感比多等一秒差得多。
+	 *
+	 * currentTime 是失败那一刻的播放位置，换源后据此续播 ——
+	 * 看到第 30 分钟突然断流、换源后又从片头开始，比直接报错更让人恼火。
+	 */
+	onExhausted?: (currentTime: number) => boolean;
 };
 
 type Candidate = { mode: "proxy" | "direct"; url: string };
@@ -40,6 +51,47 @@ type Status = "idle" | "loading" | "ready" | "failed";
 const WATCHDOG_MS = 16000; // 首帧超时（有进度则不计）
 const MAX_RECOVER = 3; // 同一候选地址内最多自愈次数
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
+
+// ---------------------------------------------------------------- 播放偏好
+
+/**
+ * 记住倍速 / 音量 / 静音。
+ *
+ * 【为什么值得单独做】
+ * 追剧的人几乎都会固定一个倍速。旧版每次切集、每次刷新都回到 1x，
+ * 一集剧要手动调十几次 —— 这是「观看体验」里最容易被忽略但最高频的摩擦点。
+ */
+const PREFS_KEY = "aurora:player:prefs";
+
+type Prefs = { speed: number; volume: number; muted: boolean };
+
+const DEFAULT_PREFS: Prefs = { speed: 1, volume: 1, muted: false };
+
+function loadPrefs(): Prefs {
+	if (typeof window === "undefined") return DEFAULT_PREFS;
+	try {
+		const raw = window.localStorage.getItem(PREFS_KEY);
+		if (!raw) return DEFAULT_PREFS;
+		const p = JSON.parse(raw) as Partial<Prefs>;
+		return {
+			// 逐项校验：localStorage 是用户可改的，脏数据不能让播放器崩掉
+			speed: typeof p.speed === "number" && p.speed > 0 && p.speed <= 4 ? p.speed : 1,
+			volume: typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1 ? p.volume : 1,
+			muted: p.muted === true,
+		};
+	} catch {
+		return DEFAULT_PREFS;
+	}
+}
+
+function savePrefs(patch: Partial<Prefs>): void {
+	if (typeof window === "undefined") return;
+	try {
+		window.localStorage.setItem(PREFS_KEY, JSON.stringify({ ...loadPrefs(), ...patch }));
+	} catch {
+		/* 隐私模式下可能写失败，忽略 */
+	}
+}
 
 function isHlsUrl(u: string): boolean {
 	return /\.m3u8($|[?#])/i.test(u) || /\/api\/stream\?u=[^&]*m3u8/i.test(u);
@@ -61,6 +113,11 @@ export default function Player(props: PlayerProps) {
 	/** 用户手动换线路时置位：手动换线不代表片源真实质量，不计入上报统计 */
 	const manualRef = useRef(false);
 	const progressRef = useRef({ t: 0, buffered: 0, at: 0 });
+	/** 倍速用 ref 同步保存：它要能被「挂载媒体」的 effect 读到，但不该进那个 effect 的依赖 */
+	const speedRef = useRef(1);
+	/** onExhausted 用 ref 存最新值，避免把它塞进 failCandidate 的依赖导致回调频繁重建 */
+	const onExhaustedRef = useRef(props.onExhausted);
+	onExhaustedRef.current = props.onExhausted;
 
 	const [candIdx, setCandIdx] = useState(0);
 	const [status, setStatus] = useState<Status>("idle");
@@ -133,12 +190,53 @@ export default function Player(props: PlayerProps) {
 				setCandIdx((i) => i + 1);
 				return;
 			}
+			// 【顺序很关键】先如实上报，再决定要不要自动换源。
+			// 不能因为「换个源就播出来了」就当作成功：这个源确实失败了，
+			// 不上报它就不会被降权，下次还会被优先选中 —— 自动换源会变成
+			// 「每次都先失败一次再绕开」，把问题永久掩盖掉。
+			report(false, current?.mode);
+
+			// 代理与直连都挂了。再问外部有没有别的片源能接管 ——
+			// 片源质量参差是这类项目的常态，自动换源比让用户自己点「换源」有用得多。
+			// 放在 setStatus("failed") 之前，否则失败页会先闪一下。
+			const at = videoRef.current?.currentTime ?? 0;
+			if (onExhaustedRef.current?.(at)) {
+				setStatus("loading");
+				setMessage("当前片源不可用，正在自动切换片源…");
+				return;
+			}
 			setStatus("failed");
 			setMessage(reason);
-			report(false, current?.mode);
 		},
 		[candIdx, candidates.length, clearTimers, destroyHls, report, current?.mode],
 	);
+
+	// -------------------------------------------------------------- 恢复播放偏好
+	// 刻意放在「挂载媒体」effect 之前：先把 muted / volume 设好，
+	// 媒体那边的 tryPlay() 才拿得到正确的初始状态 —— 上次静音的用户能直接自动播放，
+	// 不会被浏览器自动播放策略拦下。
+	// 也不能拿 localStorage 当 useState 的初始值：Player 会被 SSR 渲染一次，
+	// 那样会造成 hydration 前后不一致。
+	useEffect(() => {
+		const p = loadPrefs();
+		speedRef.current = p.speed;
+		setSpeed(p.speed);
+		const v = videoRef.current;
+		if (v) {
+			v.volume = p.volume;
+			v.muted = p.muted;
+			v.playbackRate = p.speed;
+		}
+	}, []);
+
+	// 用户拖音量条 / 点静音也要记住
+	useEffect(() => {
+		const v = videoRef.current;
+		if (!v) return;
+		const onVolume = () => savePrefs({ volume: v.volume, muted: v.muted });
+		v.addEventListener("volumechange", onVolume);
+		return () => v.removeEventListener("volumechange", onVolume);
+	}, []);
 
 	// -------------------------------------------------------------- 挂载媒体
 	useEffect(() => {
@@ -255,6 +353,8 @@ export default function Player(props: PlayerProps) {
 		destroyHls();
 		video.removeAttribute("src");
 		video.load();
+		// 倍速是元素属性，重挂媒体后必须重新应用 —— 否则每切一集都会悄悄回到 1x
+		video.playbackRate = speedRef.current;
 
 		const useHlsJs = isHlsUrl(current.url) && Hls.isSupported() && !canPlayNativeHls(video);
 
@@ -421,7 +521,9 @@ export default function Player(props: PlayerProps) {
 
 	const changeSpeed = useCallback((s: number) => {
 		setSpeed(s);
+		speedRef.current = s;
 		if (videoRef.current) videoRef.current.playbackRate = s;
+		savePrefs({ speed: s });
 	}, []);
 
 	const changeLevel = useCallback((lv: number) => {
@@ -504,7 +606,7 @@ export default function Player(props: PlayerProps) {
 					<div className="player-fail">
 						<div className="player-fail-msg">播放失败：{message}</div>
 						<div className="player-fail-hint">
-							已自动尝试：代理线路 / 直连线路 / 错误自愈。仍失败通常意味着上游已失效、需要付费或有地区限制，可以换一个片源重试。
+							已自动尝试：代理线路 / 直连线路 / 错误自愈 / 全部备用片源。仍失败通常意味着上游已失效、需要付费或有地区限制，可以稍后重试或换一部片。
 						</div>
 						<div className="player-fail-url">{externalUrl}</div>
 						<div className="player-fail-actions">

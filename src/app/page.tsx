@@ -145,6 +145,12 @@ export default function HomePage() {
 	const epBox = useRef<HTMLDivElement | null>(null);
 	/** 读「是否已经打开过片子」，避免把 play 塞进 openPlay 的依赖里 */
 	const playRef = useRef<PlayData | null>(null);
+	/**
+	 * 本次「同一部片」已经尝试过的片源。
+	 * 自动换源必须有这个防死循环：A 源失败换 B 源、B 源失败又换回 A 源 ——
+	 * 用户看到的是播放器无限重试，比直接报错还糟。
+	 */
+	const triedRef = useRef<{ vodId: string; ids: Set<string> }>({ vodId: "", ids: new Set() });
 
 	useEffect(() => setHistory(loadHistory()), []);
 
@@ -192,6 +198,12 @@ export default function HomePage() {
 		setSelected(item);
 		setPlayMsg("");
 		setResumeAt(startAt);
+		// 记录本次使用的片源，供自动换源判断「还有没有没试过的」。
+		// 换了一部片（vod_id 变了）就重置，否则会误以为新片的源都试过了。
+		if (triedRef.current.vodId !== item.vod_id) {
+			triedRef.current = { vodId: item.vod_id, ids: new Set() };
+		}
+		triedRef.current.ids.add(item.source_id);
 		// 首次打开才显示骨架屏。切集/换源时保留当前播放器直到新地址到达 ——
 		// 否则每换一集画面都会闪一下骨架，观感上比多等 200ms 差得多。
 		if (playRef.current) setPendingEp(ep);
@@ -412,6 +424,29 @@ export default function HomePage() {
 									onEnded={() => gotoEp(1)}
 									onNext={play.ep + 1 < play.episodes.length ? () => gotoEp(1) : undefined}
 									onPrev={play.ep > 0 ? () => gotoEp(-1) : undefined}
+									onExhausted={(at) => {
+										// 代理线路和直连线路都挂了 —— 换一个片源重试。
+										// 片源质量参差是这类项目的常态，这一步能救回相当一部分
+										// 「点开播不了」，比让用户自己去点「换源」有用得多。
+										if (!play || !selected) return false;
+										const next = (selected.alts ?? []).find(
+											(a) => !triedRef.current.ids.has(a.source_id),
+										);
+										if (!next) return false;
+										void openPlay(
+											{
+												...selected,
+												source_id: next.source_id,
+												source_name: next.source_name,
+												vod_id: next.vod_id,
+											},
+											play.ep,
+											-1,
+											// 播了不到 5 秒就失败，说明还没真正看到内容，从头开始更合理
+											at > 5 ? at : 0,
+										);
+										return true;
+									}}
 								/>
 
 								{/* 片子信息：旧版从接口取回了 year / area / actor / desc 却只渲染了 desc，
