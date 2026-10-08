@@ -53,6 +53,17 @@ CI 跑在 `ubuntu-latest` 且用 `npm ci`，而 `npm ci` **只装锁文件里有
 **验证**：改动后锁文件只新增这 4 条、无任何删除；`npm ci --dry-run` 通过（锁文件与
 `package.json` 同步）。
 
+**CI 实测**：`e11910d` 推送后 run `37770701138` **全绿** ——
+`verify ✓ 43s` / `deploy ✓ 1m4s`。**这是 `deploy` 作业第一次真正成功**，
+即 Cloudflare Workers 真的部署上去了（v0.3.0 那次是失败的）。
+
+**顺带消除一个同类隐患**：既然 `@next/swc-linux-*` 钉死在 `15.5.27`，
+`next` 就不能再用 `^15.5.27` —— 否则 Next 发 `15.5.28` 后一次 `npm install` 会让
+`next` 漂到 15.5.28 而 Linux 版 swc 停在 15.5.27，报
+`Mismatching @next/swc version, expected 15.5.28, got 15.5.27`，
+**且只在 Linux 上暴露**。现在 `next` / `eslint-config-next` / `@next/swc-linux-*`
+统一为精确版本 `15.5.27`（提交 `f37e06d`）。
+
 ## 一、SSRF 只修了一半：`/api/img` 漏网
 
 v0.3.0 修好了 `/api/stream` 的重定向绕过，**但 `/api/img` 还在用 `redirect: "follow"`**。
