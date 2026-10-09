@@ -71,6 +71,13 @@ type HistoryEntry = {
 
 const HISTORY_KEY = "aurora:history:v1";
 
+/**
+ * 预热下一集时，单个分片的体积上限。
+ * 正常的 HLS 分片（6~10 秒）在几 MB 量级；超过这个数说明拿到的不是分片
+ * （比如整段 mp4），那就别拖了 —— 预热是为了快，不是为了把用户流量吃满。
+ */
+const MAX_PRELOAD_BYTES = 8 * 1024 * 1024;
+
 function loadHistory(): HistoryEntry[] {
 	if (typeof window === "undefined") return [];
 	try {
@@ -292,6 +299,79 @@ export default function HomePage() {
 		[play, selected, openPlay],
 	);
 
+	/**
+	 * 预热下一集（在 Player 里「距结束 15 秒」时被调一次）。
+	 *
+	 * 【为什么要绕这么一圈】
+	 * v0.4.3 起 /api/play 只为「当前集」签发地址（避免一次回传上百个 URL），
+	 * 所以预热没法直接拿到下一集的地址，必须先问一次接口。拿到地址后：
+	 *   1) 拉改写后的 m3u8 清单（cache-control: max-age=30）
+	 *   2) 从清单里挑出第一个分片再拉一遍（分片是 max-age=600）
+	 * 这样用户真点「下一集」时，清单与首片都已在 HTTP 缓存里，hls.js 直接命中 ——
+	 * 省掉的正是「清单往返 + 首片下载」这两段最容易被感知的等待。
+	 *
+	 * 【为什么敢提前下】
+	 * 用户几乎必然要看这一集，这些字节本来也要下，只是提前了十几秒；
+	 * 反过来，如果真不看，浪费的也就是一个清单 + 一个分片。
+	 * 另外省流模式与 2G 网络直接跳过 —— 那种情况下多下几 MB 是实打实的代价。
+	 */
+	const preloadedRef = useRef("");
+
+	const preloadNext = useCallback(async () => {
+		if (!play || !selected) return;
+		const nextEp = play.ep + 1;
+		if (nextEp >= play.episodes.length) return;
+		const key = selected.source_id + ":" + selected.vod_id + ":" + nextEp;
+		if (preloadedRef.current === key) return;
+
+		const conn = (
+			navigator as Navigator & {
+				connection?: { saveData?: boolean; effectiveType?: string };
+			}
+		).connection;
+		if (conn?.saveData) return;
+		if (conn?.effectiveType && /(^|-)2g$/.test(conn.effectiveType)) return;
+
+		// 先记账再发请求：timeupdate 很密，防止同一集被并发预热多次
+		preloadedRef.current = key;
+		try {
+			const qs = new URLSearchParams({
+				source: selected.source_id,
+				id: selected.vod_id,
+				ep: String(nextEp),
+			});
+			if (play.group >= 0) qs.set("group", String(play.group));
+			const res = await fetch("/api/play?" + qs.toString());
+			const data = (await res.json()) as PlayData;
+			if (data.code !== 200) return;
+
+			const target = data.prefer === "proxy" && data.proxy ? data.proxy : data.url;
+			if (!target) return;
+			const manifest = await fetch(target);
+			if (!manifest.ok) return;
+
+			// 代理已经把 master 解析成了 media 清单，所以第一条非注释行就是分片地址
+			const seg = (await manifest.text())
+				.split("\n")
+				.map((s) => s.trim())
+				.find((s) => s && !s.startsWith("#"));
+			// 万一拿到的仍是嵌套清单，就到此为止，别套娃
+			if (!seg || /m3u8/i.test(seg)) return;
+
+			const segRes = await fetch(new URL(seg, window.location.origin).toString());
+			if (!segRes.ok) return;
+			// 【必须把 body 读完】只拿响应头不读 body，浏览器可能在响应被回收时
+			// 提前中止下载 —— 那这个分片根本没进 HTTP 缓存，预热就成了纯空转。
+			// 读成 ArrayBuffer 再丢掉，代价是几 MB 的瞬时内存，换来的是真切集时命中缓存。
+			const size = Number(segRes.headers.get("content-length") ?? "0");
+			// 防线：万一第一行不是分片而是整段 mp4，别把一个几百 MB 的文件拖下来
+			if (size > MAX_PRELOAD_BYTES) return;
+			await segRes.arrayBuffer();
+		} catch {
+			/* 预热是纯优化，任何失败都必须静默，绝不能影响正常播放 */
+		}
+	}, [play, selected]);
+
 	const altSources = useMemo(() => {
 		if (!selected) return [];
 		return selected.alts ?? [];
@@ -419,11 +499,15 @@ export default function HomePage() {
 									poster={play.pic ?? undefined}
 									title={play.title + " " + epName}
 									sourceId={play.source_id}
+									vodId={selected?.vod_id}
 									startTime={resumeAt}
 									onProgress={recordProgress}
 									onEnded={() => gotoEp(1)}
 									onNext={play.ep + 1 < play.episodes.length ? () => gotoEp(1) : undefined}
 									onPrev={play.ep > 0 ? () => gotoEp(-1) : undefined}
+									onPreloadNext={
+										play.ep + 1 < play.episodes.length ? preloadNext : undefined
+									}
 									onExhausted={(at) => {
 										// 代理线路和直连线路都挂了 —— 换一个片源重试。
 										// 片源质量参差是这类项目的常态，这一步能救回相当一部分

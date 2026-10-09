@@ -980,6 +980,98 @@ textarea {
 	}
 }
 
+/* 手势的瞬时反馈（+10 秒 / 音量 60%）：只在画面正中闪一下，不吃点击 */
+.player-hint {
+	position: absolute;
+	inset: 0;
+	margin: auto;
+	width: max-content;
+	height: max-content;
+	padding: 10px 18px;
+	border-radius: var(--r-md);
+	background: rgba(7, 11, 20, 0.72);
+	color: #fff;
+	font-size: 15px;
+	font-weight: 500;
+	pointer-events: none;
+	animation: aurora-hint 0.8s ease-out;
+}
+
+@keyframes aurora-hint {
+	from {
+		opacity: 0;
+		transform: scale(0.94);
+	}
+	25% {
+		opacity: 1;
+		transform: scale(1);
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+/* 跳过片头：浮在右下角，避开画面中心与底部原生控件 */
+.player-skip {
+	position: absolute;
+	right: var(--s-4);
+	bottom: 64px;
+	padding: 8px 16px;
+	border-radius: var(--r-full);
+	border: 1px solid var(--border-strong);
+	background: rgba(7, 11, 20, 0.78);
+	color: var(--text);
+	font-size: 13px;
+}
+
+.player-skip:hover {
+	background: rgba(7, 11, 20, 0.94);
+	border-color: var(--brand-1);
+}
+
+/* 下一集倒计时 */
+.player-next {
+	position: absolute;
+	left: 50%;
+	bottom: 72px;
+	transform: translateX(-50%);
+	display: flex;
+	align-items: center;
+	gap: var(--s-3);
+	padding: 10px 14px;
+	border-radius: var(--r-full);
+	background: rgba(7, 11, 20, 0.86);
+	border: 1px solid var(--border-strong);
+	white-space: nowrap;
+}
+
+.player-next-text {
+	font-size: 13px;
+	color: var(--text-2);
+}
+
+@media (max-width: 640px) {
+	.player-skip {
+		right: var(--s-3);
+		bottom: 58px;
+		font-size: 12px;
+	}
+	.player-next {
+		bottom: 62px;
+		gap: var(--s-2);
+		padding: 8px 10px;
+	}
+	.player-next-text {
+		font-size: 12px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.player-hint {
+		animation: none;
+	}
+}
+
 .player-tap {
 	position: absolute;
 	inset: 0;

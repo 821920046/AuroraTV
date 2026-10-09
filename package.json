@@ -1,6 +1,6 @@
 {
   "name": "auroratv",
-  "version": "0.4.2",
+  "version": "0.4.5",
   "private": true,
   "description": "AuroraTV - 影视聚合播放（基于 MoonTVPlus 魔改），部署于 Cloudflare Workers",
   "scripts": {

@@ -25,6 +25,11 @@ export type PlayerProps = {
 	poster?: string | null;
 	title?: string;
 	sourceId?: string;
+	/**
+	 * 用于按「剧」记忆片头标记。
+	 * 缺省时「跳过片头」不可用 —— 没有它就没法区分这是哪部剧。
+	 */
+	vodId?: string;
 	/** 续播起点（秒） */
 	startTime?: number;
 	autoPlay?: boolean;
@@ -43,6 +48,13 @@ export type PlayerProps = {
 	 * 看到第 30 分钟突然断流、换源后又从片头开始，比直接报错更让人恼火。
 	 */
 	onExhausted?: (currentTime: number) => boolean;
+	/**
+	 * 快播完时调用一次，供外部预热下一集（取地址 -> 清单 -> 首个分片）。
+	 *
+	 * 刻意做成「回调」而不是播放器内部实现：只有页面层知道下一集是哪一集、
+	 * 该走哪个片源；播放器连「有没有下一集」都不该关心。
+	 */
+	onPreloadNext?: () => void;
 };
 
 type Candidate = { mode: "proxy" | "direct"; url: string };
@@ -93,6 +105,71 @@ function savePrefs(patch: Partial<Prefs>): void {
 	}
 }
 
+// ---------------------------------------------------------------- 片头标记
+
+/**
+ * 按「剧」而不是按「集」记忆片头时长。
+ * 同一部剧每一集的片头长度基本一致，按集存等于让用户每集都标一次 —— 没人会这么干。
+ */
+const SKIP_KEY_PREFIX = "aurora:skip:";
+
+type SkipMark = { intro?: number };
+
+function skipKey(sourceId?: string, vodId?: string): string | null {
+	if (!sourceId || !vodId) return null;
+	return SKIP_KEY_PREFIX + sourceId + ":" + vodId;
+}
+
+function loadSkip(sourceId?: string, vodId?: string): SkipMark {
+	const key = skipKey(sourceId, vodId);
+	if (typeof window === "undefined" || !key) return {};
+	try {
+		const raw = window.localStorage.getItem(key);
+		if (!raw) return {};
+		const m = JSON.parse(raw) as Partial<SkipMark>;
+		// 逐项校验：localStorage 用户可改，脏数据不能让播放器跳到离谱的位置
+		return {
+			intro:
+				typeof m.intro === "number" && m.intro > 0 && m.intro < 3600 ? m.intro : undefined,
+		};
+	} catch {
+		return {};
+	}
+}
+
+function saveSkip(sourceId: string | undefined, vodId: string | undefined, mark: SkipMark): void {
+	const key = skipKey(sourceId, vodId);
+	if (typeof window === "undefined" || !key) return;
+	try {
+		if (mark.intro === undefined) window.localStorage.removeItem(key);
+		else window.localStorage.setItem(key, JSON.stringify(mark));
+	} catch {
+		/* ignore */
+	}
+}
+
+/** 位移文案：+10 / -10 / 0 */
+function fmtDelta(n: number): string {
+	return (n > 0 ? "+" : "") + n;
+}
+
+/** 移动端手势的常量 */
+const DOUBLE_TAP_MS = 300; // 两次点击间隔小于它才算双击
+const SEEK_STEP = 10; // 双击快进 / 后退的秒数
+const CONTROLS_ZONE_PX = 56; // 底部原生控件区域高度，这段让给浏览器
+const VOLUME_SWIPE_PX = 220; // 上下滑动多少像素对应音量 0 → 1
+const NEXT_COUNTDOWN_SEC = 8; // 播完后自动播放下一集的倒计时
+/**
+ * 距结束多少秒开始预热下一集。
+ *
+ * 不能太早：清单的 cache-control 只有 30s，提前两分钟拉等于白拉，
+ * 真切集时还是得重新走一趟。15s 的提前量刚好覆盖「倒计时 8s + 用户点立即播放」，
+ * 清单仍在有效期内，而分片（max-age=600）更是稳的。
+ */
+const PRELOAD_LEAD_SEC = 15;
+/** 短于这个时长的片子不做预热 —— 一开播就满足条件，等于无条件多下一份首片 */
+const PRELOAD_MIN_DURATION_SEC = 180;
+
 function isHlsUrl(u: string): boolean {
 	return /\.m3u8($|[?#])/i.test(u) || /\/api\/stream\?u=[^&]*m3u8/i.test(u);
 }
@@ -102,7 +179,17 @@ function canPlayNativeHls(video: HTMLVideoElement): boolean {
 }
 
 export default function Player(props: PlayerProps) {
-	const { url, proxyUrl, prefer = "proxy", poster, title, sourceId, startTime, autoPlay = true } = props;
+	const {
+		url,
+		proxyUrl,
+		prefer = "proxy",
+		poster,
+		title,
+		sourceId,
+		vodId,
+		startTime,
+		autoPlay = true,
+	} = props;
 
 	const videoRef = useRef<HTMLVideoElement | null>(null);
 	const hlsRef = useRef<Hls | null>(null);
@@ -118,6 +205,16 @@ export default function Player(props: PlayerProps) {
 	/** onExhausted 用 ref 存最新值，避免把它塞进 failCandidate 的依赖导致回调频繁重建 */
 	const onExhaustedRef = useRef(props.onExhausted);
 	onExhaustedRef.current = props.onExhausted;
+	/** 同理：倒计时的 effect 不该因为父组件每次渲染传新函数而重跑 */
+	const onNextRef = useRef(props.onNext);
+	onNextRef.current = props.onNext;
+	const skipRef = useRef<SkipMark>({});
+	const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	/** 预热下一集只在「临近结束」触发一次；Player 换集会重挂，所以普通 ref 就够 */
+	const preloadFiredRef = useRef(false);
+	/** 同 onNextRef：预热回调不该进 timeupdate 所在 effect 的依赖 */
+	const onPreloadNextRef = useRef(props.onPreloadNext);
+	onPreloadNextRef.current = props.onPreloadNext;
 
 	const [candIdx, setCandIdx] = useState(0);
 	const [status, setStatus] = useState<Status>("idle");
@@ -128,6 +225,29 @@ export default function Player(props: PlayerProps) {
 	const [needTap, setNeedTap] = useState(false);
 	/** 每次 +1 都强制重挂媒体（见 retry 的说明） */
 	const [reloadKey, setReloadKey] = useState(0);
+	/** 该剧的片头标记 */
+	const [skip, setSkip] = useState<SkipMark>({});
+	/** 当前是否该显示「跳过片头」 */
+	const [showSkipIntro, setShowSkipIntro] = useState(false);
+	/** 手势的瞬时提示（+10 秒 / 音量 60%） */
+	const [hint, setHint] = useState("");
+	/** 播完后的下一集倒计时，null 表示不在倒计时 */
+	const [nextIn, setNextIn] = useState<number | null>(null);
+
+	const flashHint = useCallback((text: string) => {
+		setHint(text);
+		if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+		hintTimerRef.current = setTimeout(() => setHint(""), 800);
+	}, []);
+
+	// 卸载时清掉提示的定时器：切集会让 Player 重挂（key 里带了 url），
+	// 不清就会对着已卸载的组件 setState。
+	useEffect(
+		() => () => {
+			if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+		},
+		[],
+	);
 
 	// 候选线路：首选在前，另一条兼得后。两条都挂才算真的失败。
 	const candidates = useMemo<Candidate[]>(() => {
@@ -328,8 +448,31 @@ export default function Player(props: PlayerProps) {
 		const onTimeUpdate = () => {
 			if (props.onProgress && Number.isFinite(video.duration))
 				props.onProgress(video.currentTime, video.duration);
+			// 「跳过片头」只在还没过片头时出现。setState 传函数时值没变会 bail out，
+			// 所以这里不会因为每秒 4 次的 timeupdate 造成额外渲染。
+			const intro = skipRef.current.intro;
+			const should = intro !== undefined && video.currentTime < intro - 1;
+			setShowSkipIntro((prev) => (prev === should ? prev : should));
+
+			// 临近结束预热下一集。timeupdate 每秒触发 4 次，靠 ref 保证只发一次。
+			if (
+				!preloadFiredRef.current &&
+				Number.isFinite(video.duration) &&
+				video.duration >= PRELOAD_MIN_DURATION_SEC &&
+				video.duration - video.currentTime <= PRELOAD_LEAD_SEC
+			) {
+				preloadFiredRef.current = true;
+				onPreloadNextRef.current?.();
+			}
 		};
-		const onEnded = () => props.onEnded?.();
+		const onEnded = () => {
+			// 有下一集就先走可取消的倒计时；没有则维持原有的一次性回调
+			if (onNextRef.current) {
+				setNextIn(NEXT_COUNTDOWN_SEC);
+				return;
+			}
+			props.onEnded?.();
+		};
 		const onNativeError = () => {
 			// 原生播放失败（非 hls.js 路径）
 			if (hlsRef.current) return;
@@ -453,6 +596,160 @@ export default function Player(props: PlayerProps) {
 		setStatus("loading");
 		setMessage("");
 	}, [url, proxyUrl]);
+
+	// -------------------------------------------------------------- 片头标记
+	// 依赖 sourceId / vodId 而不是 url：同一部剧切集时组件不会重挂，
+	// 但片头标记是按「剧」共享的，不需要每次重新读。
+	useEffect(() => {
+		const m = loadSkip(sourceId, vodId);
+		skipRef.current = m;
+		setSkip(m);
+		setShowSkipIntro(false);
+	}, [sourceId, vodId]);
+
+	const markIntro = useCallback(() => {
+		const v = videoRef.current;
+		if (!v) return;
+		const t = Math.floor(v.currentTime);
+		// 0 秒不是合法的「片头结束点」，而且 loadSkip 会把它当成脏数据丢掉 ——
+		// 存下去只会让按钮显示「片头 0s」却永远不触发，不如当场说清楚。
+		if (t <= 0) {
+			flashHint("请先播放到片头结束的位置再标记");
+			return;
+		}
+		const next: SkipMark = {};
+		// 在同一位置再点一次 = 取消标记，省掉一个「清除」按钮
+		if (skipRef.current.intro !== undefined && Math.abs(skipRef.current.intro - t) < 3) {
+			flashHint("已取消片头标记");
+		} else {
+			next.intro = t;
+			flashHint("片头结束点已设为 " + t + " 秒");
+		}
+		skipRef.current = next;
+		setSkip(next);
+		saveSkip(sourceId, vodId, next);
+	}, [sourceId, vodId, flashHint]);
+
+	const jumpIntro = useCallback(() => {
+		const v = videoRef.current;
+		const intro = skipRef.current.intro;
+		if (!v || intro === undefined) return;
+		v.currentTime = intro;
+		setShowSkipIntro(false);
+		flashHint("已跳过片头");
+	}, [flashHint]);
+
+	// -------------------------------------------------------------- 下一集倒计时
+	useEffect(() => {
+		if (nextIn === null) return;
+		if (nextIn <= 0) {
+			setNextIn(null);
+			onNextRef.current?.();
+			return;
+		}
+		const id = setTimeout(() => setNextIn((n) => (n === null ? null : n - 1)), 1000);
+		return () => clearTimeout(id);
+	}, [nextIn]);
+
+	// -------------------------------------------------------------- 移动端手势
+	// 用原生监听而不是 React 的 onTouch*：滑动调音量必须 preventDefault 阻止页面滚动，
+	// 而 React 的合成事件绑在 root 上且默认 passive，preventDefault 会被忽略。
+	useEffect(() => {
+		const el = videoRef.current;
+		if (!el) return;
+
+		let start: { x: number; y: number; volume: number } | null = null;
+		let mode: "none" | "volume" | "seek" = "none";
+		let lastTap = 0;
+		let lastSide: "left" | "right" | null = null;
+
+		/** 按秒跳转，并给出提示。定义在 effect 内，省得把依赖链再拉长一层。 */
+		const seekBy = (v: HTMLVideoElement, delta: number) => {
+			const dur = Number.isFinite(v.duration) ? v.duration : Infinity;
+			v.currentTime = Math.max(0, Math.min(dur, v.currentTime + delta));
+			flashHint(fmtDelta(delta) + " 秒");
+		};
+
+		const onStart = (e: TouchEvent) => {
+			const v = videoRef.current;
+			if (!v || e.touches.length !== 1) {
+				start = null;
+				return;
+			}
+			const t = e.touches[0];
+			const rect = el.getBoundingClientRect();
+			// 底部那一条是原生控件，必须让给浏览器 —— 抢了它用户就没法拖进度条
+			if (t.clientY > rect.bottom - CONTROLS_ZONE_PX) {
+				start = null;
+				return;
+			}
+			start = { x: t.clientX, y: t.clientY, volume: v.volume };
+			mode = "none";
+		};
+
+		const onMove = (e: TouchEvent) => {
+			const v = videoRef.current;
+			if (!start || !v) return;
+			const t = e.touches[0];
+			const dx = t.clientX - start.x;
+			const dy = t.clientY - start.y;
+			if (mode === "none") {
+				// 先判方向再决定是哪种手势，避免轻微抖动就触发
+				if (Math.abs(dx) < 14 && Math.abs(dy) < 14) return;
+				mode = Math.abs(dy) > Math.abs(dx) ? "volume" : "seek";
+			}
+			e.preventDefault();
+			if (mode === "volume") {
+				// 屏幕坐标 y 向下为正，所以上滑要取负
+				v.volume = Math.max(0, Math.min(1, start.volume - dy / VOLUME_SWIPE_PX));
+				flashHint("音量 " + Math.round(v.volume * 100) + "%");
+			} else {
+				flashHint(fmtDelta(Math.round(dx / 12)) + " 秒");
+			}
+		};
+
+		const onEnd = (e: TouchEvent) => {
+			const v = videoRef.current;
+			const s = start;
+			const m = mode;
+			start = null;
+			mode = "none";
+			if (!v || !s) return;
+
+			const t = e.changedTouches[0];
+
+			if (m === "seek") {
+				// 松手才真正跳转：拖动过程中反复 seek 会让播放器不断重新缓冲
+				const delta = Math.round((t.clientX - s.x) / 12);
+				if (delta !== 0) seekBy(v, delta);
+				return;
+			}
+			if (m !== "none") return; // 音量滑动结束，不当作点击
+
+			const rect = el.getBoundingClientRect();
+			if (t.clientY > rect.bottom - CONTROLS_ZONE_PX) return;
+			const side: "left" | "right" = t.clientX - rect.left < rect.width / 2 ? "left" : "right";
+			const now = Date.now();
+			if (lastSide === side && now - lastTap < DOUBLE_TAP_MS) {
+				lastTap = 0;
+				lastSide = null;
+				const step = side === "right" ? SEEK_STEP : -SEEK_STEP;
+				seekBy(v, step);
+				return;
+			}
+			lastTap = now;
+			lastSide = side;
+		};
+
+		el.addEventListener("touchstart", onStart, { passive: true });
+		el.addEventListener("touchmove", onMove, { passive: false });
+		el.addEventListener("touchend", onEnd, { passive: true });
+		return () => {
+			el.removeEventListener("touchstart", onStart);
+			el.removeEventListener("touchmove", onMove);
+			el.removeEventListener("touchend", onEnd);
+		};
+	}, [flashHint]);
 
 	const toggleFullscreen = useCallback(async () => {
 		const el = videoRef.current?.parentElement;
@@ -602,6 +899,34 @@ export default function Player(props: PlayerProps) {
 					</button>
 				)}
 
+				{/* 手势的瞬时反馈：+10 秒 / 音量 60%。放在正中央，眼睛不用移动 */}
+				{hint && <div className="player-hint">{hint}</div>}
+
+				{showSkipIntro && status === "ready" && (
+					<button type="button" className="player-skip" onClick={jumpIntro}>
+						跳过片头（{skip.intro} 秒）
+					</button>
+				)}
+
+				{nextIn !== null && (
+					<div className="player-next">
+						<span className="player-next-text">{nextIn} 秒后播放下一集</span>
+						<button
+							type="button"
+							className="pill"
+							onClick={() => {
+								setNextIn(null);
+								onNextRef.current?.();
+							}}
+						>
+							立即播放
+						</button>
+						<button type="button" className="pill" onClick={() => setNextIn(null)}>
+							取消
+						</button>
+					</div>
+				)}
+
 				{status === "failed" && (
 					<div className="player-fail">
 						<div className="player-fail-msg">播放失败：{message}</div>
@@ -668,6 +993,16 @@ export default function Player(props: PlayerProps) {
 						</option>
 					))}
 				</select>
+				{vodId ? (
+					<button
+						type="button"
+						className={"pill" + (skip.intro !== undefined ? " on" : "")}
+						onClick={markIntro}
+						title="把当前位置设为片头结束点；在同一位置再点一次可取消。标记按「剧」保存，下一集自动生效。"
+					>
+						{skip.intro !== undefined ? `片头 ${skip.intro}s` : "标记片头"}
+					</button>
+				) : null}
 				<button type="button" className="pill" onClick={togglePip}>
 					画中画
 				</button>
