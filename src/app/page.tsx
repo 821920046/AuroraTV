@@ -72,6 +72,19 @@ type HistoryEntry = {
 const HISTORY_KEY = "aurora:history:v1";
 
 /**
+ * 搜索结果每页渲染多少条。
+ *
+ * 【为什么要分页】
+ * 服务端一次最多回 120 条，前端原来用 `items.map()` 全量渲染。后果有两个：
+ *  1) 低端手机要一次性解析 120 个卡片节点，主线程被占住，滚动掉帧；
+ *  2) 每张卡片都带一张要走 `/api/img` 代理的海报 —— 120 次 Worker 调用。
+ * 即使 `loading="lazy"` 能拦掉折叠线以下的请求，DOM 本身的代价是实打实的。
+ *
+ * 服务端仍然返回全部 120 条（JSON 体积很小），点「加载更多」不再发起请求。
+ */
+const RESULT_PAGE_SIZE = 30;
+
+/**
  * 预热下一集时，单个分片的体积上限。
  * 正常的 HLS 分片（6~10 秒）在几 MB 量级；超过这个数说明拿到的不是分片
  * （比如整段 mp4），那就别拖了 —— 预热是为了快，不是为了把用户流量吃满。
@@ -127,6 +140,8 @@ export default function HomePage() {
 	const [kw, setKw] = useState("");
 	const [searching, setSearching] = useState(false);
 	const [results, setResults] = useState<Item[] | null>(null);
+	/** 当前渲染到第几条。新搜索时重置，见 doSearch / backHome。 */
+	const [visibleCount, setVisibleCount] = useState(RESULT_PAGE_SIZE);
 	const [searchMsg, setSearchMsg] = useState("");
 
 	const [home, setHome] = useState<{ movies: Item[]; tv: Item[] } | null>(null);
@@ -190,6 +205,7 @@ export default function HomePage() {
 			const res = await fetch("/api/search?kw=" + encodeURIComponent(q), { signal: ctrl.signal });
 			const data = (await res.json()) as { list?: Item[]; msg?: string };
 			setResults(data.list ?? []);
+			setVisibleCount(RESULT_PAGE_SIZE);
 			if (!data.list?.length) setSearchMsg(data.msg ?? "没有找到相关影片，换个关键词试试");
 		} catch (e) {
 			if ((e as Error).name !== "AbortError") setSearchMsg("搜索失败，请稍后重试");
@@ -384,41 +400,59 @@ export default function HomePage() {
 
 	const backHome = useCallback(() => {
 		setResults(null);
+		setVisibleCount(RESULT_PAGE_SIZE);
 		setSearchMsg("");
 		window.scrollTo({ top: 0, behavior: "smooth" });
 	}, []);
 
-	const grid = (items: Item[]) => (
-		<div className="grid">
-			{items.map((it) => {
-				const altCount = it.alts?.length ?? 0;
-				return (
-					<button
-						type="button"
-						key={it.source_id + ":" + it.vod_id}
-						className="card"
-						onClick={() => void openPlay(it)}
-						aria-label={`播放 ${it.title}`}
-					>
-						<div className="poster-box">
-							<Poster src={it.poster} alt={it.title} />
-							{it.remarks ? <span className="card-badge">{it.remarks}</span> : null}
-							{altCount > 0 ? (
-								<span className="card-badge is-alt">{altCount + 1} 源</span>
-							) : null}
-							<span className="play-overlay" aria-hidden="true" />
-						</div>
-						<div className="card-body">
-							<div className="card-title">{it.title}</div>
-							<div className="card-meta">
-								{[it.year, it.type_name, it.source_name].filter(Boolean).join(" · ")}
-							</div>
-						</div>
-					</button>
-				);
-			})}
-		</div>
-	);
+	const grid = (items: Item[]) => {
+		const shown = items.slice(0, visibleCount);
+		const rest = items.length - shown.length;
+		return (
+			<>
+				<div className="grid">
+					{shown.map((it) => {
+						const altCount = it.alts?.length ?? 0;
+						return (
+							<button
+								type="button"
+								key={it.source_id + ":" + it.vod_id}
+								className="card"
+								onClick={() => void openPlay(it)}
+								aria-label={`播放 ${it.title}`}
+							>
+								<div className="poster-box">
+									<Poster src={it.poster} alt={it.title} />
+									{it.remarks ? <span className="card-badge">{it.remarks}</span> : null}
+									{altCount > 0 ? (
+										<span className="card-badge is-alt">{altCount + 1} 源</span>
+									) : null}
+									<span className="play-overlay" aria-hidden="true" />
+								</div>
+								<div className="card-body">
+									<div className="card-title">{it.title}</div>
+									<div className="card-meta">
+										{[it.year, it.type_name, it.source_name].filter(Boolean).join(" · ")}
+									</div>
+								</div>
+							</button>
+						);
+					})}
+				</div>
+				{rest > 0 && (
+					<div className="grid-more">
+						<button
+							type="button"
+							className="pill"
+							onClick={() => setVisibleCount((n) => n + RESULT_PAGE_SIZE)}
+						>
+							加载更多（还有 {rest} 部）
+						</button>
+					</div>
+				)}
+			</>
+		);
+	};
 
 	const skeletonGrid = (n: number) => (
 		<div className="grid" aria-hidden="true">

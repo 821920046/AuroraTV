@@ -31,6 +31,30 @@ const dec = new TextDecoder();
 /** 代理签名默认有效期：12 小时（长剧集连续播放也够用） */
 export const DEFAULT_TOKEN_TTL = 60 * 60 * 12;
 
+/**
+ * 签名过期时间的对齐网格（秒）。
+ *
+ * 【为什么必须量化】
+ * 原来是 `exp = now + ttl`，精确到秒。于是同一张海报、同一个分片，
+ * 只要两次打开相差一秒，签出来的 URL 就不同。而：
+ *   - Cloudflare 边缘缓存的键**含查询串**，`t` 一变就是一个新键；
+ *   - 浏览器 HTTP 缓存同样按完整 URL 命中。
+ * 结果是 `/api/img` 上写的 `cacheTtl: 86400`、`cache-control: max-age=86400`
+ * 全部落空 —— 实际命中窗口被搜索缓存（30 分钟）和首页 KV 缓存（3 小时）卡死，
+ * 一过就全量重下。一个搜索页 120 张海报，就是这么每次都重新拉一遍的。
+ *
+ * 量化到整小时后，同一个小时里铸出来的令牌完全一致，URL 稳定，
+ * 浏览器缓存与边缘缓存才真正开始工作。
+ *
+ * 【安全性没有变差】
+ * 令牌的内容仍是 `exp | prefix` 加 HMAC，前缀绑定、过期判定都不变。
+ * 唯一的变化是**存活时间不再是恒定的 ttl，而是落在 `(ttl - 网格, ttl]` 区间**：
+ * 上界不变，下界最多低一个网格。按 12 小时 TTL + 1 小时网格算，
+ * 最短也有约 11 小时 —— 对「一集电视剧连续播放」依然宽裕，
+ * 且这个下界是确定的、可推算的，不是随机的。
+ */
+export const TOKEN_GRID_SEC = 60 * 60;
+
 export type ProxyEnv = {
 	STREAM_SECRET?: string;
 	CRON_SECRET?: string;
@@ -347,7 +371,9 @@ export async function mintToken(
 	prefix: string,
 	ttl: number = DEFAULT_TOKEN_TTL,
 ): Promise<string> {
-	const exp = Math.floor(Date.now() / 1000) + ttl;
+	// 对齐到整小时网格：见 TOKEN_GRID_SEC 的说明。
+	// 没有这一步，URL 每秒都在变，边缘缓存与浏览器缓存永远命中不了。
+	const exp = Math.floor(Math.floor(Date.now() / 1000) / TOKEN_GRID_SEC) * TOKEN_GRID_SEC + ttl;
 	const sig = await sign(secret, exp + "|" + prefix);
 	return exp + "." + b64urlEncode(prefix) + "." + sig;
 }

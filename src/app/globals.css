@@ -497,6 +497,18 @@ textarea {
 	gap: var(--s-4);
 }
 
+/* 「加载更多」：单独一行，居中，与上面的卡片墙留出呼吸空间 */
+.grid-more {
+	display: flex;
+	justify-content: center;
+	margin-top: var(--s-6);
+}
+
+.grid-more .pill {
+	padding: 10px 22px;
+	font-size: 14px;
+}
+
 .card {
 	/* 关键修复：.card 是 <button>，必须清掉全局 button 的 padding，
 	   否则海报被内缩，卡片看起来像「框里套框」而不是海报墙 */

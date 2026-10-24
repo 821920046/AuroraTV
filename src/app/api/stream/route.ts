@@ -40,6 +40,28 @@ const CORS_HEADERS: Record<string, string> = {
 	"timing-allow-origin": "*",
 };
 
+/**
+ * 哪些上游地址值得进 Cloudflare 边缘缓存：只有 HLS 分片。
+ *
+ * 【为什么之前等于没缓存】
+ * 这里原本对**所有**请求都写 `cf: { cacheEverything: false }`，而 `/api/stream`
+ * 这个路径没有文件扩展名，本来就不在 Cloudflare 的默认缓存名单里 ——
+ * 两者叠加的后果是**每个分片都要完整跑一次 Worker 再回源一次上游**。
+ * 一集 45 分钟的剧约 450 个分片，就是这么硬扛下来的；
+ * 手机上观感就是「一直缓冲、一直加载」。
+ *
+ * 【为什么只放分片，不放 mp4】
+ * mp4 是单个大对象，Range 请求会把缓存打得很碎，命中率低；
+ * 分片则是 6~10 秒一小块，同一部剧的所有观众拉的是同样的 URL，
+ * 命中率极高。收益大、风险小。
+ *
+ * 【为什么清单（m3u8）不缓存上游】
+ * 清单由 rewritePlaylist 现算，响应头也只给 max-age=30；
+ * 直播清单更是每次都必须回源。缓存上游纯属浪费。
+ */
+const EDGE_CACHEABLE_SEGMENT = /\.(ts|m4s|aac|key)($|[?#])/i;
+const SEGMENT_EDGE_TTL = 600;
+
 function err(status: number, msg: string, extra?: Record<string, string>): Response {
 	return new Response(JSON.stringify({ code: status, msg, ...extra }), {
 		status,
@@ -89,6 +111,11 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	let upstream: Response | null = null;
 	let usedVariant: HeaderVariant = "browser";
 	let finalUrl = target;
+	// 分片才走边缘缓存，理由见 EDGE_CACHEABLE_SEGMENT 上面的长注释。
+	const edgeCache = EDGE_CACHEABLE_SEGMENT.test(target);
+	const upstreamCf = edgeCache
+		? { cacheEverything: true, cacheTtl: SEGMENT_EDGE_TTL }
+		: { cacheEverything: false };
 
 	// ---------- 请求头降级梯子 ----------
 	for (const variant of HEADER_LADDER) {
@@ -97,7 +124,7 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 				method,
 				// Referer 必须按「当前这一跳」的域名生成，跳转后仍带旧域名的 Referer 会被拒。
 				headers: (u) => upstreamHeaders(u, range ? { range } : undefined, variant),
-				cf: { cacheEverything: false },
+				cf: upstreamCf,
 			});
 			if (!got.ok) {
 				attempts.push({ variant, status: got.error });
@@ -215,6 +242,9 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 		if (v) out.set(h, v);
 	}
 	if (!out.has("accept-ranges")) out.set("accept-ranges", "bytes");
+	// 注意这里的判断比上面的 EDGE_CACHEABLE_SEGMENT 宽（多了 mp4）—— 两者不是漏改：
+	// 这一行管的是**浏览器**缓存（mp4 的 Range 请求由浏览器自己消化，缓存它有益），
+	// EDGE_CACHEABLE_SEGMENT 管的是 **Cloudflare 边缘**缓存（mp4 单个大对象会把缓存打碎）。
 	const cacheable = /\.(ts|m4s|mp4|aac|key)($|[?#])/i.test(finalUrl);
 	out.set("cache-control", cacheable ? "public, max-age=600" : "no-store");
 	out.set("x-aurora-upstream", new URL(finalUrl).host);

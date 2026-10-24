@@ -13,6 +13,7 @@ import {
 	INSECURE_DEFAULT_SECRET,
 	MAX_REDIRECTS,
 	TokenMinter,
+	TOKEN_GRID_SEC,
 	getExplicitSecret,
 	guardedFetch,
 	hostOf,
@@ -165,6 +166,40 @@ test("verifyToken：过期令牌被拒", async () => {
 	const token = await mintToken(SECRET, urlPrefix(target), -10);
 	const v = await verifyToken(SECRET, token, target);
 	assert.equal(v.ok === false && v.reason, "token expired");
+});
+
+test("mintToken：过期时间对齐到整小时网格", async () => {
+	// 这一条是「缓存能命中」的前提：URL 必须稳定，不能每秒都变。
+	const token = await mintToken(SECRET, "https://cdn.example.com/hls/1/");
+	const exp = Number(token.split(".")[0]);
+	assert.ok(Number.isFinite(exp), "exp 应为数字");
+	assert.equal(exp % TOKEN_GRID_SEC, 0, "exp 必须落在网格边界上");
+});
+
+test("mintToken：同一小时内两次铸出完全相同的令牌", async () => {
+	const a = await mintToken(SECRET, "https://cdn.example.com/hls/1/");
+	const b = await mintToken(SECRET, "https://cdn.example.com/hls/1/");
+	assert.equal(a, b, "同前缀、同一网格内必须得到同一个 URL，否则缓存永远命中不了");
+});
+
+test("mintToken：量化后的有效期落在 (now+ttl-网格, now+ttl] 内", async () => {
+	// exp = floor(now/g)*g + ttl，所以上界恒为 now+ttl，下界最多低一个网格。
+	// 写这条测试是为了把「量化到底改变了什么」钉死：只降下界，不动上界。
+	const before = Math.floor(Date.now() / 1000);
+	const token = await mintToken(SECRET, "https://cdn.example.com/hls/1/", 3600);
+	const after = Math.floor(Date.now() / 1000);
+	const exp = Number(token.split(".")[0]);
+	assert.ok(exp <= after + 3600, "上界必须是 now+ttl");
+	assert.ok(exp > before + 3600 - TOKEN_GRID_SEC, "下界最低只到 now+ttl-网格");
+	// 默认 12 小时 TTL 下，最短存活仍有 11 小时以上，连续播放一集够用
+	const minLife = DEFAULT_TOKEN_TTL - TOKEN_GRID_SEC + 1;
+	assert.ok(minLife >= 11 * 60 * 60, "默认参数下最短存活不得低于 11 小时");
+});
+
+test("verifyToken：量化后的令牌照常通过校验", async () => {
+	const target = "https://cdn.example.com/hls/1/2.ts";
+	const token = await mintToken(SECRET, urlPrefix(target));
+	assert.deepEqual(await verifyToken(SECRET, token, target), { ok: true });
 });
 
 test("verifyToken：缺失 / 结构错误的令牌被拒", async () => {

@@ -89,7 +89,10 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	const got = await guardedFetch(target, {
 		method,
 		headers: (u) => upstreamHeaders(u, { accept: "image/avif,image/webp,image/*,*/*;q=0.8" }),
-		// 海报是高重复、低变更内容，交给 Cloudflare 边缘缓存 1 天，几乎不增加回源
+		// 海报是高重复、低变更内容，交给 Cloudflare 边缘缓存 1 天，几乎不增加回源。
+		// 【这行能生效的前提】签名 URL 必须稳定 —— 见 lib/proxy.ts 的 TOKEN_GRID_SEC。
+		// 曾经的病因是 token 里的 exp 精确到秒，同一张海报每次打开的 URL 都不一样，
+		// 而 Cloudflare 的缓存键含查询串，于是这一行从来没真正命中过。
 		cf: { cacheEverything: true, cacheTtl: 86400 },
 	});
 	if (!got.ok) return err(502, "image " + got.error);

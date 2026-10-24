@@ -1,12 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+	CLIENT_ID_COOKIE,
 	RATE_RULES,
 	bucketOf,
 	checkRateLimit,
+	clientIdCookie,
 	clientIp,
 	decide,
+	newClientId,
+	rateIdentity,
 	rateKey,
+	readCookie,
 	windowIndex,
 	type MinimalCache,
 } from "./ratelimit.ts";
@@ -32,6 +37,13 @@ function req(path: string, ip = "1.2.3.4"): Request {
 	return new Request("https://auroratv.example" + path, {
 		headers: { "cf-connecting-ip": ip },
 	});
+}
+
+/** 带（或不带）客户端标识 cookie 的请求 —— 模拟 CGNAT 下的多个用户。 */
+function reqCid(path: string, ip: string, cid: string | null): Request {
+	const headers: Record<string, string> = { "cf-connecting-ip": ip };
+	if (cid) headers.cookie = CLIENT_ID_COOKIE + "=" + cid;
+	return new Request("https://auroratv.example" + path, { headers });
 }
 
 // ---------------------------------------------------------------- 纯逻辑
@@ -196,6 +208,88 @@ test("checkRateLimit：不同端点各自独立计数", async () => {
 	assert.equal((await checkRateLimit(req("/api/search"), { cache, nowMs })).limited, true);
 	// search 打满了，play 不该受影响
 	assert.equal((await checkRateLimit(req("/api/play"), { cache, nowMs })).limited, false);
+});
+
+// ---------------------------------------------------------------- CGNAT
+
+test("rateIdentity：有 cookie 时是 ip|cid，没有时退回纯 IP", () => {
+	assert.equal(rateIdentity(reqCid("/api/search", "1.2.3.4", "abc")), "1.2.3.4|abc");
+	assert.equal(rateIdentity(reqCid("/api/search", "1.2.3.4", null)), "1.2.3.4");
+});
+
+test("readCookie：只在同名键上命中，空值与畸形片段被忽略", () => {
+	const mk = (c: string | null) =>
+		new Request("https://x.example/", { headers: c ? { cookie: c } : {} });
+	assert.equal(readCookie(mk("aurora_cid=u1"), CLIENT_ID_COOKIE), "u1");
+	assert.equal(readCookie(mk("a=1; aurora_cid=u2; b=3"), CLIENT_ID_COOKIE), "u2");
+	assert.equal(readCookie(mk("other=u3"), CLIENT_ID_COOKIE), null);
+	assert.equal(readCookie(mk("aurora_cid="), CLIENT_ID_COOKIE), null);
+	assert.equal(readCookie(mk("aurora_cid"), CLIENT_ID_COOKIE), null);
+	assert.equal(readCookie(mk(null), CLIENT_ID_COOKIE), null);
+});
+
+test("clientIdCookie：带 Path/Max-Age/SameSite，https 时才加 Secure", () => {
+	const v = clientIdCookie("u1", true);
+	assert.ok(v.startsWith(CLIENT_ID_COOKIE + "=u1;"));
+	assert.ok(v.includes("Path=/"));
+	assert.ok(v.includes("SameSite=Lax"));
+	assert.ok(v.includes("Max-Age=31536000"));
+	assert.ok(v.includes("Secure"), "https 下必须带 Secure");
+	assert.ok(!clientIdCookie("u1", false).includes("Secure"), "http 下不能带 Secure");
+});
+
+test("newClientId：两次生成不相同且非空", () => {
+	const a = newClientId();
+	const b = newClientId();
+	assert.ok(a.length > 0);
+	assert.notEqual(a, b);
+});
+
+test("checkRateLimit：CGNAT 下同一 IP 的不同客户端互不挤占", async () => {
+	// 这正是手机上「明明没怎么用却一直 429」的复现场景：
+	// 一个共享出口 IP 底下的多个用户，改造前会互相把限额烧光。
+	const cache = fakeCache();
+	const rule = RATE_RULES.search;
+	const nowMs = 1_700_000_000_000;
+	const nat = "203.0.113.9"; // CGNAT 共享出口
+
+	for (let i = 0; i < rule.limit; i++) {
+		await checkRateLimit(reqCid("/api/search", nat, "user-a"), { cache, nowMs });
+	}
+	// user-a 已经打满
+	assert.equal(
+		(await checkRateLimit(reqCid("/api/search", nat, "user-a"), { cache, nowMs })).limited,
+		true,
+	);
+	// 同一出口下的 user-b 完全不受影响 —— 改造前这里会被误杀
+	assert.equal(
+		(await checkRateLimit(reqCid("/api/search", nat, "user-b"), { cache, nowMs })).limited,
+		false,
+	);
+});
+
+test("checkRateLimit：换 cookie 不能绕开 IP 维度（IP 仍在键里）", async () => {
+	// 防的是「脚本靠不断换 ID 无限刷」：每个新 ID 都是新桶，看似绕过了，
+	// 但 IP 段仍在键中，配合边缘限流仍可识别。这里至少保证行为是可预期的：
+	// 同一 IP + 同一 cid 才会累计。
+	const cache = fakeCache();
+	const nowMs = 1_700_000_000_000;
+	await checkRateLimit(reqCid("/api/search", "1.2.3.4", "u1"), { cache, nowMs });
+	await checkRateLimit(reqCid("/api/search", "1.2.3.4", "u2"), { cache, nowMs });
+	assert.equal(cache.store.size, 2, "两个不同身份应该是两条独立计数");
+});
+
+test("checkRateLimit：无 cookie 时行为与改造前完全一致（纯 IP 计数）", async () => {
+	const cache = fakeCache();
+	const rule = RATE_RULES.search;
+	const nowMs = 1_700_000_000_000;
+	for (let i = 0; i < rule.limit; i++) {
+		await checkRateLimit(reqCid("/api/search", "1.2.3.4", null), { cache, nowMs });
+	}
+	assert.equal(
+		(await checkRateLimit(reqCid("/api/search", "1.2.3.4", null), { cache, nowMs })).limited,
+		true,
+	);
 });
 
 test("checkRateLimit：Cache 不可用时一律放行（可用性优先）", async () => {

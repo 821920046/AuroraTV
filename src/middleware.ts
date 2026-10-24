@@ -1,5 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import {
+	CLIENT_ID_COOKIE,
+	clientIdCookie,
+	newClientId,
+	readCookie,
+} from "@/lib/ratelimit";
 
 // 站长鉴权：HTTP Basic Auth 保护全站。
 // 排除静态资源与三类自带鉴权的接口：
@@ -34,11 +40,34 @@ function withSecurity(res: NextResponse): NextResponse {
 	return res;
 }
 
+/**
+ * 给首次访问的客户端签发一个匿名标识，供限流分桶用。
+ *
+ * 【为什么放在中间件】
+ * 限流按 `cf-connecting-ip` 计数在 CGNAT 下会把同一出口下的所有用户混成一个桶
+ * （详见 lib/ratelimit.ts 里 rateIdentity 的注释），需要一个按客户端区分的依据。
+ * 中间件是全站唯一收口的地方，在这里下发最省事。
+ *
+ * 只在缺失时下发：否则每个响应都要多带一个 Set-Cookie，纯浪费。
+ */
+function withClientId(req: NextRequest, res: NextResponse): NextResponse {
+	if (readCookie(req, CLIENT_ID_COOKIE)) return res;
+	try {
+		res.headers.set(
+			"set-cookie",
+			clientIdCookie(newClientId(), req.nextUrl.protocol === "https:"),
+		);
+	} catch {
+		/* 个别运行时可能不允许改响应头。忽略即可 —— 限流会自动退回纯 IP。 */
+	}
+	return res;
+}
+
 export function middleware(req: NextRequest) {
 	const { env } = getCloudflareContext();
 	const user = env.USERNAME;
 	const pass = env.PASSWORD;
-	if (!user || !pass) return withSecurity(NextResponse.next()); // 未配置则不鉴权
+	if (!user || !pass) return withClientId(req, withSecurity(NextResponse.next())); // 未配置则不鉴权
 
 	const auth = req.headers.get("authorization");
 	if (auth) {
@@ -50,15 +79,19 @@ export function middleware(req: NextRequest) {
 				const u = decoded.slice(0, idx);
 				const p = decoded.slice(idx + 1);
 				if (safeEqual(u, user) && safeEqual(p, pass)) {
-					return withSecurity(NextResponse.next());
+					return withClientId(req, withSecurity(NextResponse.next()));
 				}
 			} catch {
 				// 非法 base64，当作鉴权失败处理
 			}
 		}
 	}
-	return new NextResponse("Authentication required", {
-		status: 401,
-		headers: { "WWW-Authenticate": 'Basic realm="AuroraTV"', ...SECURITY_HEADERS },
-	});
+	// 401 也带上标识：万一这个 IP 已经被别人挤到限额，重试时就能拿到自己的桶
+	return withClientId(
+		req,
+		new NextResponse("Authentication required", {
+			status: 401,
+			headers: { "WWW-Authenticate": 'Basic realm="AuroraTV"', ...SECURITY_HEADERS },
+		}),
+	);
 }

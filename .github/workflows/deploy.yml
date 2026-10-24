@@ -49,7 +49,10 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - name: Build and Deploy
-        run: npx opennextjs-cloudflare build && npx wrangler deploy
+        # --dangerouslyUseUnsupportedNextVersion：Next 15 已于 2026-10-21 停止官方支持
+        # （发布 2024-10-21 + 2 年），opennextjs-cloudflare 1.20.9 从此拒绝构建。
+        # 项目尚未升级到 Next 16，详情与升级代价见 README「已知限制」第 11 条。
+        run: npx opennextjs-cloudflare build --dangerouslyUseUnsupportedNextVersion && npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

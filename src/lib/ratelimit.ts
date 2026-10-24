@@ -91,9 +91,11 @@ export function windowIndex(nowMs: number, windowSec: number): number {
  * 计数键。
  * 刻意把 bucket 与窗口序号都编进 key：换窗口就换 key，不需要任何清理逻辑，
  * 旧窗口的条目靠 cache 自身的 max-age 自然过期。
+ *
+ * 最后一段是客户端身份（`ip | cid`），不再只是 IP —— 见 rateIdentity 的说明。
  */
-export function rateKey(bucket: string, win: number, ip: string): string {
-	return "rl:" + bucket + ":" + win + ":" + ip;
+export function rateKey(bucket: string, win: number, identity: string): string {
+	return "rl:" + bucket + ":" + win + ":" + identity;
 }
 
 /**
@@ -128,6 +130,73 @@ export function clientIp(req: Request): string {
 		if (first) return first;
 	}
 	return "unknown";
+}
+
+// ---------------------------------------------------------------- 客户端标识
+
+/**
+ * 客户端标识 cookie 名。
+ *
+ * 【为什么需要它：CGNAT】
+ * 只用 `cf-connecting-ip` 计数在国内移动网络下是错的。运营商大量使用
+ * CGNAT，成百上千个用户共享同一个公网 IPv4，Cloudflare 看到的那个 IP
+ * 是共享出口。于是一个宿舍 / 一栋楼 / 一个片区的用户会互相挤占同一个限额，
+ * 表现为「明明没怎么用，却一直 429」。家用宽带是独立公网 IP，碰不到这个问题 ——
+ * 这也是同样的代码在桌面正常、在手机上稀烂的原因之一。
+ *
+ * 由中间件签发一个一次性随机 ID 放进 cookie，限流键改成 `ip | cid`：
+ *   - 正常用户各自一个桶，不再互相挤占；
+ *   - IP 仍然在键里，所以「换 ID 绕过」并不能绕开 IP 维度，
+ *     只能把桶切细，挡不住脚本但也不至于把防护降到零；
+ *   - 没有 cookie（首次访问 / 禁用 cookie）时自动退回纯 IP，行为与改动前一致。
+ *
+ * 注意这个 ID **不是鉴权凭据**，只是一个匿名区分符：不可伪造的判定仍然只依赖
+ * HMAC 令牌与 Basic Auth，与它无关。
+ */
+export const CLIENT_ID_COOKIE = "aurora_cid";
+
+/** cookie 有效期：一年。它只用于限流分桶，不需要更短。 */
+export const CLIENT_ID_MAX_AGE = 60 * 60 * 24 * 365;
+
+/** 从 Cookie 头里取一个值。 */
+export function readCookie(req: Request, name: string): string | null {
+	const raw = req.headers.get("cookie");
+	if (!raw) return null;
+	for (const part of raw.split(";")) {
+		const eq = part.indexOf("=");
+		if (eq < 0) continue;
+		if (part.slice(0, eq).trim() !== name) continue;
+		const v = part.slice(eq + 1).trim();
+		return v || null;
+	}
+	return null;
+}
+
+/** 生成一个新的客户端标识。 */
+export function newClientId(): string {
+	return crypto.randomUUID();
+}
+
+/** 拼出 Set-Cookie 值。 */
+export function clientIdCookie(id: string, secure: boolean): string {
+	return (
+		CLIENT_ID_COOKIE +
+		"=" +
+		id +
+		"; Path=/; Max-Age=" +
+		CLIENT_ID_MAX_AGE +
+		"; SameSite=Lax" +
+		(secure ? "; Secure" : "")
+	);
+}
+
+/**
+ * 限流用的客户端身份：`ip | cid`，取不到 cid 时就是纯 ip。
+ */
+export function rateIdentity(req: Request): string {
+	const ip = clientIp(req);
+	const cid = readCookie(req, CLIENT_ID_COOKIE);
+	return cid ? ip + "|" + cid : ip;
 }
 
 /** 本模块只依赖 Cache 的这两个方法 —— 抽成接口是为了单测能塞假实现进去。 */
@@ -222,7 +291,7 @@ export async function checkRateLimit(
 
 	const nowMs = deps.nowMs ?? Date.now();
 	const win = windowIndex(nowMs, rule.windowSec);
-	const key = rateKey(bucket, win, clientIp(req));
+	const key = rateKey(bucket, win, rateIdentity(req));
 
 	const prev = await readCount(cache, key);
 	const { allowed, next } = decide(prev, rule.limit);
