@@ -1133,18 +1133,34 @@ textarea {
 }
 
 /* 播放失败面板 */
+/*
+ * 【为什么必须是 absolute】它排在 height:100% 的 <video> 后面，
+ * 静态流内布局会被 .player-frame 的 overflow:hidden 裁到只剩 1px ——
+ * 实测 failVisibleHeight = 1，用户看到的是一个纯黑框，
+ * 「重试 / 换线路 / 复制地址 / VLC / .strm」一个都点不到。
+ * 改成和 .player-overlay 一致的绝对定位浮层。
+ */
 .player-fail {
+	position: absolute;
+	inset: 0;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
+	/*
+	 * 窄屏上「原因 + 提示 + 地址 + 5 个按钮」会比 16:9 画面还高。
+	 * safe center：内容超高时贴着上边排，不会把第一行裁掉；
+	 * 不支持的浏览器忽略这条声明，退回普通居中（只是顶部可能被裁）。
+	 */
+	justify-content: safe center;
 	gap: var(--s-2);
 	padding: var(--s-10) var(--s-5);
 	text-align: center;
 	background: var(--bg-elev);
 	border: 1px solid var(--border);
 	border-radius: var(--r-md);
-	min-height: 220px;
+	/* 仍然超高时允许在面板内滚动，而不是硬裁 */
+	overflow: auto;
 }
 
 .player-fail .emoji {

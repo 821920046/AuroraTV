@@ -6,6 +6,7 @@ import {
 	newClientId,
 	readCookie,
 } from "@/lib/ratelimit";
+import { safeEqual } from "@/lib/safeEqual";
 
 // 站长鉴权：HTTP Basic Auth 保护全站。
 // 排除静态资源与三类自带鉴权的接口：
@@ -20,14 +21,7 @@ export const config = {
 	matcher: ["/((?!_next/static|_next/image|favicon.ico|api/cron|api/stream|api/img).*)"],
 };
 
-/** 定长比较，避免时序侧信道 */
-function safeEqual(a: string, b: string): boolean {
-	if (a.length !== b.length) return false;
-	let diff = 0;
-	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-	return diff === 0;
-}
-
+/** 定长比较在 lib/safeEqual.ts：cron 路由也要用，不能各写一份 */
 const SECURITY_HEADERS: Record<string, string> = {
 	"x-content-type-options": "nosniff",
 	"referrer-policy": "no-referrer",

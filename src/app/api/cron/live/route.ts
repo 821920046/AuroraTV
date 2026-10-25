@@ -6,15 +6,16 @@ import {
 	probeChannels,
 	ingestEpg,
 } from "@/lib/live";
+import { isCronAuthorized } from "@/lib/cronAuth";
 
-// 由 workers/scheduler 或外部定时服务调用，需携带 ?secret=CRON_SECRET。
+// 由 workers/scheduler 或外部定时服务调用。
+// 推荐 Authorization: Bearer <CRON_SECRET>；?secret= 仅为兼容旧部署而保留。
 // 默认：摄取频道 + 探活一批。可选 ?ingest=0 跳过摄取，?epg=1 额外拉 EPG。
 // 探活数量可用 ?probe=N 调节；Cloudflare 免费版每次请求最多 50 个子请求，
 // 同时摄取时需给 M3U 拉取留余量，故边摄取边探活时默认只探 45 个。
 export async function GET(req: NextRequest) {
 	const { env } = getCloudflareContext();
-	const secret = req.nextUrl.searchParams.get("secret");
-	if (!env.CRON_SECRET || secret !== env.CRON_SECRET)
+	if (!isCronAuthorized(req, env.CRON_SECRET))
 		return NextResponse.json({ code: 401 }, { status: 401 });
 	if (!env.AURORA_DB) return NextResponse.json({ code: 500, msg: "no db" }, { status: 500 });
 

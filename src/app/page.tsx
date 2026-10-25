@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Player from "@/components/Player";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import SiteHeader from "@/components/SiteHeader";
 
 // ============================================================================
@@ -25,6 +26,8 @@ type Item = {
 	remarks?: string;
 	type_name?: string;
 	alts?: Array<{ source_id: string; source_name?: string; vod_id: string }>;
+	/** 这部片实际存在于多少个源上（含主源），不受 alts 条数上限影响 */
+	source_count?: number;
 };
 
 /**
@@ -413,6 +416,9 @@ export default function HomePage() {
 				<div className="grid">
 					{shown.map((it) => {
 						const altCount = it.alts?.length ?? 0;
+						// 真实源数优先：alts 被截断在 8 条，照它显示会在同名片
+						// 超过 9 个源时开始说谎。缺省时退回 altCount + 1（旧数据形状）。
+						const srcCount = it.source_count ?? altCount + 1;
 						return (
 							<button
 								type="button"
@@ -424,8 +430,8 @@ export default function HomePage() {
 								<div className="poster-box">
 									<Poster src={it.poster} alt={it.title} />
 									{it.remarks ? <span className="card-badge">{it.remarks}</span> : null}
-									{altCount > 0 ? (
-										<span className="card-badge is-alt">{altCount + 1} 源</span>
+									{srcCount > 1 ? (
+										<span className="card-badge is-alt">{srcCount} 源</span>
 									) : null}
 									<span className="play-overlay" aria-hidden="true" />
 								</div>
@@ -523,8 +529,10 @@ export default function HomePage() {
 							</div>
 						)}
 
-						{!playLoading && play && (
-							<>
+					{!playLoading && play && (
+						<>
+							{/* 播放器是整页最复杂的客户端组件，崩溃时不能带走搜索框和结果列表 */}
+							<ErrorBoundary label="播放器出错了">
 								<Player
 									key={play.source_id + ":" + play.ep + ":" + play.url}
 									url={play.url}
@@ -566,6 +574,7 @@ export default function HomePage() {
 										return true;
 									}}
 								/>
+							</ErrorBoundary>
 
 								{/* 片子信息：旧版从接口取回了 year / area / actor / desc 却只渲染了 desc，
 								    而且用的是 12px 的 .card-meta —— 等于把这些数据白拿了。 */}

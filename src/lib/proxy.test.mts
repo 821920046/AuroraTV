@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	DEFAULT_TOKEN_TTL,
+	IMAGE_TOKEN_GRID_SEC,
 	INSECURE_DEFAULT_SECRET,
 	MAX_REDIRECTS,
 	TokenMinter,
@@ -176,6 +177,32 @@ test("mintToken：过期时间对齐到整小时网格", async () => {
 	assert.equal(exp % TOKEN_GRID_SEC, 0, "exp 必须落在网格边界上");
 });
 
+test("mintToken：自定义网格按该网格对齐", async () => {
+	// 图片走 6 小时网格：网格边界是 6 的整数倍
+	const token = await mintToken(SECRET, "https://pic.example.com/", DEFAULT_TOKEN_TTL, IMAGE_TOKEN_GRID_SEC);
+	const exp = Number(token.split(".")[0]);
+	assert.equal(exp % IMAGE_TOKEN_GRID_SEC, 0, "图片 token 必须落在 6 小时网格边界上");
+	assert.ok(IMAGE_TOKEN_GRID_SEC > TOKEN_GRID_SEC, "图片网格必须大于流网格，否则没有意义");
+});
+
+test("mintToken：图片网格内两次铸出完全相同的令牌", async () => {
+	const a = await mintToken(SECRET, "https://pic.example.com/", DEFAULT_TOKEN_TTL, IMAGE_TOKEN_GRID_SEC);
+	const b = await mintToken(SECRET, "https://pic.example.com/", DEFAULT_TOKEN_TTL, IMAGE_TOKEN_GRID_SEC);
+	assert.equal(a, b, "同一 6 小时窗口内 URL 必须稳定，否则浏览器缓存永远命中不了");
+});
+
+test("mintToken：图片 token 的最短存活 = ttl - 图片网格，仍在 6 小时以上", async () => {
+	const before = Math.floor(Date.now() / 1000);
+	const token = await mintToken(SECRET, "https://pic.example.com/", DEFAULT_TOKEN_TTL, IMAGE_TOKEN_GRID_SEC);
+	const after = Math.floor(Date.now() / 1000);
+	const exp = Number(token.split(".")[0]);
+	// 区间断言：上界 now+ttl，下界 now+ttl-网格（与流的量化规则同构）
+	assert.ok(exp <= after + DEFAULT_TOKEN_TTL, "上界必须是 now+ttl");
+	assert.ok(exp > before + DEFAULT_TOKEN_TTL - IMAGE_TOKEN_GRID_SEC, "下界最低只到 now+ttl-图片网格");
+	const minLife = DEFAULT_TOKEN_TTL - IMAGE_TOKEN_GRID_SEC + 1;
+	assert.ok(minLife >= 6 * 60 * 60, "图片 token 最短存活不得低于 6 小时");
+});
+
 test("mintToken：同一小时内两次铸出完全相同的令牌", async () => {
 	const a = await mintToken(SECRET, "https://cdn.example.com/hls/1/");
 	const b = await mintToken(SECRET, "https://cdn.example.com/hls/1/");
@@ -312,6 +339,49 @@ test("TokenMinter：同一前缀只铸一次令牌（500 片列表只做 1 次 H
 	const tokenOf = (u: string) => new URL(u, "https://x").searchParams.get("t");
 	assert.equal(tokenOf(a), tokenOf(b));
 	assert.match(a, /^\/api\/stream\?u=/);
+});
+
+test("TokenMinter：图片与流的令牌分开缓存，互不串用", async () => {
+	// 回归保护：两者网格不同（6h vs 1h），同一个 host 签出来的令牌必须不同。
+	// 共用一张缓存表时，其中一类会拿到另一类的令牌 —— 表现为海报 URL
+	// 照样每小时变，或直播看到一半 403，且极难定位。
+	const minter = new TokenMinter(SECRET);
+	const tokenOf = (u: string) => new URL(u, "https://x").searchParams.get("t") ?? "";
+	const img = tokenOf(await minter.imageUrl("https://pic.example.com/a.jpg"));
+	const stream = tokenOf(await minter.streamUrl("https://pic.example.com/a.ts"));
+	assert.notEqual(img, stream, "同一 host 的图片令牌与流令牌必须不同");
+
+	const imgExp = Number(img.split(".")[0]);
+	const streamExp = Number(stream.split(".")[0]);
+	assert.equal(imgExp % IMAGE_TOKEN_GRID_SEC, 0, "图片令牌按 6 小时网格");
+	assert.equal(streamExp % TOKEN_GRID_SEC, 0, "流令牌按 1 小时网格");
+});
+
+test("TokenMinter：同 host 的多张海报共用同一个图片令牌", async () => {
+	const minter = new TokenMinter(SECRET);
+	const tokenOf = (u: string) => new URL(u, "https://x").searchParams.get("t");
+	const a = await minter.imageUrl("https://pic.example.com/2024/a.jpg");
+	const b = await minter.imageUrl("https://pic.example.com/2024/b.jpg");
+	const c = await minter.imageUrl("https://pic.example.com/other/c.jpg");
+	assert.equal(tokenOf(a), tokenOf(b));
+	assert.equal(tokenOf(b), tokenOf(c), "站点级签名：同域海报共用一个令牌");
+	// 但 u= 必须各自不同，否则所有海报会指向同一张图
+	const uOf = (u: string) => new URL(u, "https://x").searchParams.get("u");
+	assert.notEqual(uOf(a), uOf(b));
+});
+
+test("TokenMinter：不同 host 的图片令牌不同（前缀绑定）", async () => {
+	const minter = new TokenMinter(SECRET);
+	const tokenOf = (u: string) => new URL(u, "https://x").searchParams.get("t");
+	const a = tokenOf(await minter.imageUrl("https://pic-a.example.com/a.jpg"));
+	const b = tokenOf(await minter.imageUrl("https://pic-b.example.com/b.jpg"));
+	assert.notEqual(a, b);
+});
+
+test("TokenMinter：不安全的地址原样返回，不套代理", async () => {
+	const minter = new TokenMinter(SECRET);
+	assert.equal(await minter.imageUrl("http://127.0.0.1/x.jpg"), "http://127.0.0.1/x.jpg");
+	assert.equal(await minter.streamUrl("http://127.0.0.1/x.ts"), "http://127.0.0.1/x.ts");
 });
 
 test("isLivePlaylist：无 ENDLIST 判为直播", () => {

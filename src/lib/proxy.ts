@@ -55,6 +55,28 @@ export const DEFAULT_TOKEN_TTL = 60 * 60 * 12;
  */
 export const TOKEN_GRID_SEC = 60 * 60;
 
+/**
+ * 图片专用对齐网格：6 小时。
+ *
+ * 【为什么图片和流要分开】
+ * 网格同时决定两件事：URL 的稳定期，以及令牌的最短存活时间
+ * （`最短存活 = ttl - 网格`，网格末秒铸出的令牌立即少一个网格）。
+ * 这两个诉求在图片和流上是冲突的：
+ *
+ * - 图片：浏览器与边缘缓存键含完整 URL，而 URL 里有 token。
+ *   缓存头写的是 1 天，但用 1 小时网格意味着每个整点全部图片 URL 一起失效，
+ *   跨小时回访必然把整个海报网格重新拉一遍（浏览器缓存里那份
+ *    max-age=86400 的旧 URL 再也不会被请求）。放到 6 小时，
+ *   回访直接吃浏览器缓存，一个请求都不发。
+ * - 流：直播可能连看七八个小时，token 最短存活会掉到 `12h - 网格`。
+ *   1 小时网格 ⇒ 最短 11 小时，看一整晚都够；6 小时网格 ⇒ 最短 6 小时，
+ *   长时间挂机直播会在中途断流。所以流保持 1 小时网格不动。
+ *
+ * 顺带的安全性账：图片 token 的存活区间从「11~12 小时」变成「6~12 小时」，
+ * 最短存活反而更短，泄漏窗口的平均值是下降的。
+ */
+export const IMAGE_TOKEN_GRID_SEC = 60 * 60 * 6;
+
 export type ProxyEnv = {
 	STREAM_SECRET?: string;
 	CRON_SECRET?: string;
@@ -370,10 +392,11 @@ export async function mintToken(
 	secret: string,
 	prefix: string,
 	ttl: number = DEFAULT_TOKEN_TTL,
+	grid: number = TOKEN_GRID_SEC,
 ): Promise<string> {
-	// 对齐到整小时网格：见 TOKEN_GRID_SEC 的说明。
+	// 对齐到网格：见 TOKEN_GRID_SEC / IMAGE_TOKEN_GRID_SEC 的说明。
 	// 没有这一步，URL 每秒都在变，边缘缓存与浏览器缓存永远命中不了。
-	const exp = Math.floor(Math.floor(Date.now() / 1000) / TOKEN_GRID_SEC) * TOKEN_GRID_SEC + ttl;
+	const exp = Math.floor(Math.floor(Date.now() / 1000) / grid) * grid + ttl;
 	const sig = await sign(secret, exp + "|" + prefix);
 	return exp + "." + b64urlEncode(prefix) + "." + sig;
 }
@@ -415,7 +438,16 @@ export async function verifyToken(
  * 也就跑不了单测。显式字段声明虽然啰嗦，但换来了可测性。
  */
 export class TokenMinter {
-	private readonly cache = new Map<string, Promise<string>>();
+	/**
+	 * 图片与流的 token 必须分开缓存。
+	 *
+	 * 两者的网格不同（IMAGE_TOKEN_GRID_SEC vs TOKEN_GRID_SEC），
+	 * 即使是同一个前缀，签出来的令牌也不同。共用一张表会让其中一类
+	 * 拿到另一类的令牌 —— 表现是「海报 URL 每隔一小时还是变」
+	 * 或「直播看到一半 403」，且极难定位。
+	 */
+	private readonly imageCache = new Map<string, Promise<string>>();
+	private readonly streamCache = new Map<string, Promise<string>>();
 	private readonly secret: string;
 	private readonly ttl: number;
 
@@ -424,27 +456,30 @@ export class TokenMinter {
 		this.ttl = ttl;
 	}
 
-	private token(prefix: string): Promise<string> {
-		let t = this.cache.get(prefix);
-		if (!t) {
-			t = mintToken(this.secret, prefix, this.ttl);
-			this.cache.set(prefix, t);
-		}
-		return t;
-	}
-
-	/** 视频 / 播放列表 / 分片 -> /api/stream?... */
+	/** 视频 / 播放列表 / 分片 -> /api/stream?... （1 小时网格，见 TOKEN_GRID_SEC） */
 	async streamUrl(rawUrl: string): Promise<string> {
 		if (!isSafeUpstream(rawUrl)) return rawUrl;
-		const t = await this.token(urlPrefix(rawUrl));
-		return "/api/stream?u=" + encodeURIComponent(rawUrl) + "&t=" + t;
+		const prefix = urlPrefix(rawUrl);
+		let t = this.streamCache.get(prefix);
+		if (!t) {
+			t = mintToken(this.secret, prefix, this.ttl, TOKEN_GRID_SEC);
+			this.streamCache.set(prefix, t);
+		}
+		// 缓存里存的是 Promise（并发去重），取出后必须 await ——
+		// 直接拼字符串会得到 "&t=[object Promise]"，所有地址一起失效。
+		return "/api/stream?u=" + encodeURIComponent(rawUrl) + "&t=" + (await t);
 	}
 
-	/** 海报 / 台标 -> /api/img?... （站点级签名，命中率高） */
+	/** 海报 / 台标 -> /api/img?... （6 小时网格，见 IMAGE_TOKEN_GRID_SEC） */
 	async imageUrl(rawUrl: string): Promise<string> {
 		if (!isSafeUpstream(rawUrl)) return rawUrl;
-		const t = await this.token(hostPrefix(rawUrl));
-		return "/api/img?u=" + encodeURIComponent(rawUrl) + "&t=" + t;
+		const prefix = hostPrefix(rawUrl);
+		let t = this.imageCache.get(prefix);
+		if (!t) {
+			t = mintToken(this.secret, prefix, this.ttl, IMAGE_TOKEN_GRID_SEC);
+			this.imageCache.set(prefix, t);
+		}
+		return "/api/img?u=" + encodeURIComponent(rawUrl) + "&t=" + (await t);
 	}
 }
 

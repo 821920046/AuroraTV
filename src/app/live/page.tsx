@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Player from "@/components/Player";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import SiteHeader from "@/components/SiteHeader";
 
 // ============================================================================
@@ -126,9 +127,11 @@ export default function Live() {
 					</div>
 				</section>
 
-				<div ref={playerBox}>
-					{src && active && (
-						<div className="player-wrap">
+			<div ref={playerBox}>
+				{src && active && (
+					<div className="player-wrap">
+						{/* 直播源地址质量参差，播放器崩溃时不能带走整个频道列表 */}
+						<ErrorBoundary label="播放器出错了">
 							<Player
 								key={active.id}
 								url={src.url}
@@ -137,7 +140,8 @@ export default function Live() {
 								title={active.name}
 								sourceId={active.id}
 							/>
-							<div className="live-now">
+						</ErrorBoundary>
+						<div className="live-now">
 								<strong>{active.name}</strong>
 								{epg.now && (
 									<span className="live-epg">

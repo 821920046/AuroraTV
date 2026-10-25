@@ -89,10 +89,20 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	const got = await guardedFetch(target, {
 		method,
 		headers: (u) => upstreamHeaders(u, { accept: "image/avif,image/webp,image/*,*/*;q=0.8" }),
-		// 海报是高重复、低变更内容，交给 Cloudflare 边缘缓存 1 天，几乎不增加回源。
-		// 【这行能生效的前提】签名 URL 必须稳定 —— 见 lib/proxy.ts 的 TOKEN_GRID_SEC。
-		// 曾经的病因是 token 里的 exp 精确到秒，同一张海报每次打开的 URL 都不一样，
-		// 而 Cloudflare 的缓存键含查询串，于是这一行从来没真正命中过。
+		/*
+		 * 海报是高重复、低变更内容，交给 Cloudflare 边缘缓存。
+		 *
+		 * 【这行能生效的前提】签名 URL 必须稳定 —— 见 lib/proxy.ts 的 TOKEN_GRID_SEC。
+		 * 曾经的病因是 token 里的 exp 精确到秒，同一张海报每次打开的 URL 都不一样，
+		 * 而 Cloudflare 的缓存键含查询串，于是这一行从来没真正命中过。
+		 *
+		 * 【实际复用窗口是 ~1 小时，不是字面上的 1 天】exp 对齐到整小时网格，
+		 * 跨过整点所有图片 token 一起变、URL 一起变，缓存键随之失效。
+		 * 所以 86400 的真实含义是「同一个 URL 在被重复请求的这段时间里一直有效」，
+		 * 而不是「一张海报一整天只回源一次」。想跨小时复用就得把网格放大到天级，
+		 * 那会让 token 的最短存活时间掉到 0（网格末秒铸出的令牌立即过期）——
+		 * 权衡之后保持现状：一小时内全员共享同一批 URL，边缘命中率已经很高。
+		 */
 		cf: { cacheEverything: true, cacheTtl: 86400 },
 	});
 	if (!got.ok) return err(502, "image " + got.error);
@@ -127,6 +137,8 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	// 刻意【不透传 content-length】：Workers 的 fetch 会自动解压 gzip/br 并移除
 	// content-encoding，但 content-length 仍是压缩前的长度。原样回传会让浏览器按
 	// 旧长度截断图片（表现为「图裂了一半」），而分块传输没有任何副作用。
+	// 缓存口径与上面的 cf.cacheTtl 一致：URL 每小时轮换一次，浏览器这份
+	// max-age=86400 同样只在「同一小时内重复请求同一张图」时真正兑现。
 	out.set("cache-control", "public, max-age=86400, stale-while-revalidate=604800");
 
 	if (method === "HEAD" || !upstream.body) return new Response(null, { status: 200, headers: out });

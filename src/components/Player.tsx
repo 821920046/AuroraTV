@@ -1,6 +1,10 @@
 "use client";
 
-import Hls, { type ErrorData, type Events, type Level } from "hls.js";
+// hls.js 只按类型导入：值在「真的要播 m3u8 且浏览器不能原生播」时才动态 import。
+// 静态 import 会把它塞进首屏 bundle（压缩后约 174 kB），
+// 而 iOS Safari 的 <video> 直接吃 m3u8、首页/直播页根本不碰它 —— 那笔钱纯属白花。
+import type Hls from "hls.js";
+import type { ErrorData, Events, Level } from "hls.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // ============================================================================
@@ -499,10 +503,15 @@ export default function Player(props: PlayerProps) {
 		// 倍速是元素属性，重挂媒体后必须重新应用 —— 否则每切一集都会悄悄回到 1x
 		video.playbackRate = speedRef.current;
 
-		const useHlsJs = isHlsUrl(current.url) && Hls.isSupported() && !canPlayNativeHls(video);
+		const startNative = () => {
+			if (disposed) return;
+			video.src = current.url;
+			video.load();
+			tryPlay();
+		};
 
-		if (useHlsJs) {
-			const hls = new Hls({
+		const startHls = (HlsClass: typeof Hls) => {
+			const hls = new HlsClass({
 				enableWorker: true,
 				lowLatencyMode: false,
 				backBufferLength: 60,
@@ -519,25 +528,25 @@ export default function Player(props: PlayerProps) {
 			hls.attachMedia(video);
 			hls.loadSource(current.url);
 
-			hls.on(Hls.Events.MANIFEST_PARSED, (_e: Events.MANIFEST_PARSED, data) => {
+			hls.on(HlsClass.Events.MANIFEST_PARSED, (_e: Events.MANIFEST_PARSED, data) => {
 				setLevels(data.levels ?? []);
 				tryPlay();
 			});
-			hls.on(Hls.Events.LEVEL_SWITCHED, (_e: Events.LEVEL_SWITCHED, data) => {
+			hls.on(HlsClass.Events.LEVEL_SWITCHED, (_e: Events.LEVEL_SWITCHED, data) => {
 				setLevel(data.level);
 			});
-			hls.on(Hls.Events.ERROR, (_e: Events.ERROR, data: ErrorData) => {
+			hls.on(HlsClass.Events.ERROR, (_e: Events.ERROR, data: ErrorData) => {
 				if (!data.fatal) return;
 				if (recoverRef.current >= MAX_RECOVER) {
 					failCandidate(describeHlsError(data));
 					return;
 				}
 				recoverRef.current += 1;
-				if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+				if (data.type === HlsClass.ErrorTypes.NETWORK_ERROR) {
 					// 清单拉不到 = 跨域/防盗链，重试无意义，直接换线路
 					if (
-						data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
-						data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR
+						data.details === HlsClass.ErrorDetails.MANIFEST_LOAD_ERROR ||
+						data.details === HlsClass.ErrorDetails.MANIFEST_PARSING_ERROR
 					) {
 						failCandidate(describeHlsError(data));
 						return;
@@ -548,7 +557,7 @@ export default function Player(props: PlayerProps) {
 					} catch {
 						failCandidate(describeHlsError(data));
 					}
-				} else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+				} else if (data.type === HlsClass.ErrorTypes.MEDIA_ERROR) {
 					setMessage("解码异常，正在修复…");
 					try {
 						hls.recoverMediaError();
@@ -559,10 +568,30 @@ export default function Player(props: PlayerProps) {
 					failCandidate(describeHlsError(data));
 				}
 			});
+		};
+
+		// 【为什么值得懒加载】hls.js 压缩后约 174 kB，而它能派上用场的场合只有一个：
+		// 「地址是 m3u8」且「浏览器不能原生播」。iOS Safari 的 <video> 直接吃 m3u8，
+		// 那 174 kB 一分都不该为它下载；首页与直播页更是完全不碰它，
+		// 过去却因为顶层 import 把整个库塞进了首屏 bundle。
+		// 动态 import 让 webpack 把它拆成独立 chunk，只在真的需要时才拉。
+		const needHlsJs = isHlsUrl(current.url) && !canPlayNativeHls(video);
+		if (needHlsJs) {
+			void import("hls.js")
+				.then((mod) => {
+					if (disposed) return;
+					// isSupported() 现在才能问（它是类上的静态方法）：不支持的浏览器退回原生，
+					// 失败路径与旧版逐字一致 —— 懒加载不会让补救少一条。
+					if (mod.default.isSupported()) startHls(mod.default);
+					else startNative();
+				})
+				.catch(() => {
+					// 弱网 / CDN 故障导致 chunk 拉不到：退回原生播放，而不是卡在加载态。
+					if (disposed) return;
+					startNative();
+				});
 		} else {
-			video.src = current.url;
-			video.load();
-			tryPlay();
+			startNative();
 		}
 
 		armWatchdog();
