@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Player from "@/components/Player";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import SiteHeader from "@/components/SiteHeader";
+import {
+	FAV_GROUP,
+	FAV_KEY,
+	isFav,
+	parseFavs,
+	serializeFavs,
+	toggleFavId,
+} from "@/lib/liveFavs";
 
 // ============================================================================
 // 直播页
@@ -13,6 +21,7 @@ import SiteHeader from "@/components/SiteHeader";
 //  - 频道分组 chips 在窄屏横向滚动，而不是换行成三四排把频道网格挤下去。
 //  - 切换分组时不再把整个网格替换成「加载中」，而是原地变暗 ——
 //    否则每点一次分组，画面都要闪一下、滚动位置也会跳。
+//  - 频道收藏：纯逻辑在 lib/liveFavs.ts（可单测），这里只负责 localStorage 读写。
 // ============================================================================
 
 type Channel = {
@@ -48,10 +57,14 @@ export default function Live() {
 	const [src, setSrc] = useState<PlaySrc | null>(null);
 	const [active, setActive] = useState<Channel | null>(null);
 	const [epg, setEpg] = useState<{ now?: EpgItem | null; next?: EpgItem | null }>({});
+	/** 收藏的频道 id 列表 */
+	const [favs, setFavs] = useState<string[]>([]);
 
 	// 只有首次加载才显示整屏骨架；之后切分组只是让网格变暗
 	const firstLoad = useRef(true);
 	const playerBox = useRef<HTMLDivElement | null>(null);
+	/** 盘是否已经读过。没读过之前不能落盘 —— 那会把用户的收藏清成空数组 */
+	const favsLoaded = useRef(false);
 
 	async function load(g?: string) {
 		setLoading(true);
@@ -71,6 +84,34 @@ export default function Live() {
 
 	useEffect(() => {
 		void load();
+	}, []);
+
+	// 收藏：挂载后读盘（不能当 useState 初始值 —— 页面会被 SSR 一次，
+	// 那样会造成 hydration 前后不一致，与 Player 的偏好恢复同一套理由）
+	useEffect(() => {
+		try {
+			setFavs(parseFavs(window.localStorage.getItem(FAV_KEY)));
+		} catch {
+			setFavs([]);
+		}
+		favsLoaded.current = true;
+	}, []);
+
+	// 变更后落盘。用 effect 而不是在 setFavs 的更新函数里写盘：
+	// StrictMode 下更新函数会被调用两次，副作用混进去会写两遍。
+	useEffect(() => {
+		if (!favsLoaded.current) return;
+		try {
+			window.localStorage.setItem(FAV_KEY, serializeFavs(favs));
+		} catch {
+			/* 隐私模式下可能写失败：收藏本次不落盘，不影响其它功能 */
+		}
+	}, [favs]);
+
+	const favSet = useMemo(() => new Set(favs), [favs]);
+
+	const toggleFav = useCallback((id: string) => {
+		setFavs((prev) => toggleFavId(prev, id));
 	}, []);
 
 	async function play(ch: Channel) {
@@ -100,9 +141,12 @@ export default function Live() {
 
 	const filtered = useMemo(() => {
 		const kw = q.trim().toLowerCase();
-		if (!kw) return channels;
-		return channels.filter((c) => c.name.toLowerCase().includes(kw));
-	}, [channels, q]);
+		// 收藏是跨分组的：用户收藏的频道可能散在各组里，
+		// 所以点「收藏」时 load() 拉的是全量频道，这里只做客户端过滤。
+		let list = group === FAV_GROUP ? channels.filter((c) => favSet.has(c.id)) : channels;
+		if (kw) list = list.filter((c) => c.name.toLowerCase().includes(kw));
+		return list;
+	}, [channels, q, group, favSet]);
 
 	const showSkeleton = loading && firstLoad.current;
 
@@ -154,19 +198,37 @@ export default function Live() {
 					)}
 				</div>
 
-				{/* 分组条：窄屏横向滚动，不换行 */}
-				<div className="live-groups chips-scroll">
+			{/* 分组条：窄屏横向滚动，不换行 */}
+			<div className="live-groups chips-scroll">
+				{/* 收藏置顶。只有真的有时才显示 —— 否则chip 行永远多一个空项，
+				    而发现入口是每张卡片左上角的 ★（一直可见）。 */}
+				{favs.length > 0 && (
 					<button
 						type="button"
-						className={"chip" + (group === "" ? " chip-on" : "")}
-						aria-pressed={group === ""}
+						className={"chip" + (group === FAV_GROUP ? " chip-on" : "")}
+						aria-pressed={group === FAV_GROUP}
 						onClick={() => {
-							setGroup("");
-							void load();
+							setGroup(FAV_GROUP);
+							// 当前是分组视图时才需要重拉：收藏可能来自任何分组。
+							// 已经在「全部」或「★ 收藏」就不浪费一次请求
+							// （边缘缓存虽便宜，但不是免费）。
+							if (group !== "" && group !== FAV_GROUP) void load();
 						}}
 					>
-						全部
+						★ 收藏 <span className="live-count">{favs.length}</span>
 					</button>
+				)}
+				<button
+					type="button"
+					className={"chip" + (group === "" ? " chip-on" : "")}
+					aria-pressed={group === ""}
+					onClick={() => {
+						setGroup("");
+						void load();
+					}}
+				>
+					全部
+				</button>
 					{groups.map((g) => (
 						<button
 							type="button"
@@ -192,37 +254,62 @@ export default function Live() {
 							</div>
 						))}
 					</div>
-				) : filtered.length === 0 ? (
-					<div className="empty">
-						<div className="emoji">📺</div>
-						<h3>{q ? "没有匹配的频道" : "还没有频道"}</h3>
-						<p>
-							{q
-								? "换个关键词，或点上方「全部」查看所有分组。"
+			) : filtered.length === 0 ? (
+				<div className="empty">
+					<div className="emoji">{q ? "🔍" : group === FAV_GROUP ? "⭐" : "📺"}</div>
+					<h3>
+						{q ? "没有匹配的频道" : group === FAV_GROUP ? "还没有收藏" : "还没有频道"}
+					</h3>
+					<p>
+						{q
+							? "换个关键词，或点上方「全部」查看所有分组。"
+							: group === FAV_GROUP
+								? "点频道卡片左上角的 ★ 把常看的频道收进来，之后它会被置顶成一个分组。"
 								: "到「管理」页点击「立即刷新频道」从 M3U 订阅源摄取，或等待 Cron 自动摄取。"}
-						</p>
-					</div>
-				) : (
+					</p>
+				</div>
+			) : (
 					<div
 						className="live-grid"
 						style={{ opacity: loading ? 0.5 : 1, transition: "opacity .2s ease" }}
 						aria-busy={loading}
 					>
-						{filtered.map((ch) => (
-							<button
-								type="button"
-								key={ch.id}
-								className={"live-card" + (active?.id === ch.id ? " is-active" : "")}
-								aria-pressed={active?.id === ch.id}
-								onClick={() => void play(ch)}
-							>
-								{ch.flags?.geoblock && <span className="live-tag">地区限</span>}
-								<div className="live-logo">
-									<Logo src={ch.logo} name={ch.name} />
-								</div>
-								<div className="live-name">{ch.name}</div>
-							</button>
-						))}
+					{filtered.map((ch) => {
+						const fav = isFav(favs, ch.id);
+						return (
+							/* 外层容器只为给星标提供定位上下文：
+							   星标不能嵌在 .live-card 里面 —— 它本身是 <button>，
+							   button 套 button 是非法 HTML，点击行为也会变得不确定。 */
+							<div className="live-cell" key={ch.id}>
+								<button
+									type="button"
+									className={"live-card" + (active?.id === ch.id ? " is-active" : "")}
+									aria-pressed={active?.id === ch.id}
+									onClick={() => void play(ch)}
+								>
+									{ch.flags?.geoblock && <span className="live-tag">地区限</span>}
+									<div className="live-logo">
+										<Logo src={ch.logo} name={ch.name} />
+									</div>
+									<div className="live-name">{ch.name}</div>
+								</button>
+								<button
+									type="button"
+									className={"live-fav" + (fav ? " is-on" : "")}
+									aria-pressed={fav}
+									aria-label={(fav ? "取消收藏 " : "收藏 ") + ch.name}
+									title={fav ? "取消收藏" : "收藏"}
+									onClick={(e) => {
+										// 必须拦住：否则点星标会顺带触发底下的播放
+										e.stopPropagation();
+										toggleFav(ch.id);
+									}}
+								>
+									★
+								</button>
+							</div>
+						);
+					})}
 					</div>
 				)}
 

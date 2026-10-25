@@ -1525,6 +1525,64 @@ textarea {
 	min-height: 2.7em;
 }
 
+/* ---------- 频道收藏 ---------- */
+
+/*
+ * 卡片外层容器：只为一颗星标提供定位上下文。
+ * 星标不能嵌在 .live-card 里 —— 它本身是 <button>，button 套 button 是非法 HTML。
+ */
+.live-cell {
+	position: relative;
+}
+
+/* 网格项从 .live-card 变成 .live-cell 后，卡片要自己撑满格子，否则高度会塌 */
+.live-cell > .live-card {
+	width: 100%;
+	height: 100%;
+}
+
+/*
+ * 星标：左上角，与右上角的「地区限」标签错开。
+ * 尺寸用 calc 从间距刻度推（24+4），不引入刻度外的野生值。
+ */
+.live-fav {
+	position: absolute;
+	top: var(--s-1);
+	left: var(--s-1);
+	width: calc(var(--s-6) + var(--s-1));
+	height: calc(var(--s-6) + var(--s-1));
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	font-size: 13px;
+	line-height: 1;
+	border-radius: var(--r-full);
+	border: 1px solid var(--border);
+	background: var(--bg-elev);
+	color: var(--muted-2);
+	cursor: pointer;
+	transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+		background var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+.live-fav:hover {
+	color: var(--warn);
+	border-color: rgba(245, 158, 11, 0.5);
+	transform: scale(1.08);
+}
+
+.live-fav.is-on {
+	color: var(--warn);
+	border-color: rgba(245, 158, 11, 0.55);
+	background: rgba(245, 158, 11, 0.16);
+}
+
+.live-fav:focus-visible {
+	outline: 2px solid var(--brand-1);
+	outline-offset: 2px;
+}
+
 .live-tag {
 	position: absolute;
 	top: 6px;
