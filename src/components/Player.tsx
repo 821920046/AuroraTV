@@ -89,10 +89,18 @@ function loadPrefs(): Prefs {
 		const raw = window.localStorage.getItem(PREFS_KEY);
 		if (!raw) return DEFAULT_PREFS;
 		const p = JSON.parse(raw) as Partial<Prefs>;
+		// 逐项校验：localStorage 是用户可改的，脏数据不能让播放器崩掉。
+		//
+		// volume 必须排除 0：静音态与「音量为 0」在用户看来是同一件事，
+		// 但 0 是一个会被持久化的合法数值 —— 手指在手机上误滑一下、
+		// 或者按下方向键下沿，就会把 0 存进去，之后每次打开都是彻底无声，
+		// 而画面上没有任何「已静音」的标记可循（video.muted 仍是 false）。
+		// 宁可让用户重调一次音量，也不能让它变成永久故障。
+		const vol = p.volume;
+		const volume = typeof vol === "number" && vol > 0 && vol <= 1 ? vol : 1;
 		return {
-			// 逐项校验：localStorage 是用户可改的，脏数据不能让播放器崩掉
 			speed: typeof p.speed === "number" && p.speed > 0 && p.speed <= 4 ? p.speed : 1,
-			volume: typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1 ? p.volume : 1,
+			volume,
 		};
 	} catch {
 		return DEFAULT_PREFS;
@@ -177,10 +185,6 @@ function isHlsUrl(u: string): boolean {
 	return /\.m3u8($|[?#])/i.test(u) || /\/api\/stream\?u=[^&]*m3u8/i.test(u);
 }
 
-function canPlayNativeHls(video: HTMLVideoElement): boolean {
-	return video.canPlayType("application/vnd.apple.mpegurl") !== "";
-}
-
 export default function Player(props: PlayerProps) {
 	const {
 		url,
@@ -221,6 +225,8 @@ export default function Player(props: PlayerProps) {
 	 *  ② 用户一旦与页面交互（点击 / 按键），应自动恢复声音。
 	 */
 	const autoMutedRef = useRef(false);
+	/** 是否还没经历过第一次 playing：用于「首次出画面时纠正外部强制静音」，只做一次 */
+	const firstPlayRef = useRef(true);
 	const skipRef = useRef<SkipMark>({});
 	const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	/** 预热下一集只在「临近结束」触发一次；Player 换集会重挂，所以普通 ref 就够 */
@@ -246,6 +252,17 @@ export default function Player(props: PlayerProps) {
 	const [hint, setHint] = useState("");
 	/** 播完后的下一集倒计时，null 表示不在倒计时 */
 	const [nextIn, setNextIn] = useState<number | null>(null);
+	/**
+	 * 实际生效的播放内核。
+	 *
+	 * 这是排查「有画面没声音」的关键信息：同一个 m3u8，
+	 * 走 hls.js（MSE 解封装）和走浏览器原生播放器，音频表现可能完全不同 ——
+	 * 尤其在 Android / 夸克这类内核上，原生播 HLS 会丢掉音频轨。
+	 * 把它显示出来，用户反馈时才有可验证的事实，而不是互相猜。
+	 */
+	const [engine, setEngine] = useState<"hls" | "native" | null>(null);
+	/** 声音自检的结果文本，非空时显示在播放条上 */
+	const [audioDiag, setAudioDiag] = useState("");
 
 	const flashHint = useCallback((text: string) => {
 		setHint(text);
@@ -411,6 +428,7 @@ export default function Player(props: PlayerProps) {
 		// 切集/换线路/换片源时重置自动静音标记：
 		// 新的媒体可能再次被自动播放策略拦截，需要让 unmute effect 重新生效
 		autoMutedRef.current = false;
+		firstPlayRef.current = true;
 		// 手动换线时保持「已上报」状态，让本次挂载不再上报（manualRef 读后即清）
 		reportedRef.current = manualRef.current;
 		manualRef.current = false;
@@ -493,6 +511,16 @@ export default function Player(props: PlayerProps) {
 		const onPlaying = () => {
 			setStatus("ready");
 			setNeedTap(false);
+			// 【第一次真正出画面时兜一次】
+			// 部分国产浏览器（夸克 / UC 等）和某些系统级「省流」设置会默认静音网页媒体。
+			// 这种静音既不来自我们的代码，也不会走 tryPlay 的 catch 分支，
+			// 表现为：muted=true、volume=1、画面正常、完全无声，且用户找不到开关。
+			// 只在首次 playing 时纠正一次 —— 之后用户若主动点静音，必须尊重，
+			// 所以不能每次 playing 都覆盖（seek、缓冲恢复也会触发 playing）。
+			if (firstPlayRef.current) {
+				firstPlayRef.current = false;
+				if (video.muted && !autoMutedRef.current) video.muted = false;
+			}
 		};
 		const onTimeUpdate = () => {
 			if (props.onProgress && Number.isFinite(video.duration))
@@ -550,12 +578,14 @@ export default function Player(props: PlayerProps) {
 
 		const startNative = () => {
 			if (disposed) return;
+			setEngine("native");
 			video.src = current.url;
 			video.load();
 			tryPlay();
 		};
 
 		const startHls = (HlsClass: typeof Hls) => {
+			setEngine("hls");
 			const hls = new HlsClass({
 				enableWorker: true,
 				lowLatencyMode: false,
@@ -615,12 +645,25 @@ export default function Player(props: PlayerProps) {
 			});
 		};
 
-		// 【为什么值得懒加载】hls.js 压缩后约 174 kB，而它能派上用场的场合只有一个：
-		// 「地址是 m3u8」且「浏览器不能原生播」。iOS Safari 的 <video> 直接吃 m3u8，
-		// 那 174 kB 一分都不该为它下载；首页与直播页更是完全不碰它，
-		// 过去却因为顶层 import 把整个库塞进了首屏 bundle。
-		// 动态 import 让 webpack 把它拆成独立 chunk，只在真的需要时才拉。
-		const needHlsJs = isHlsUrl(current.url) && !canPlayNativeHls(video);
+		// 【播放内核的选择：优先 hls.js，而不是「原生能播就用原生」】
+		//
+		// 旧逻辑是 `isHlsUrl(url) && !canPlayNativeHls(video)` —— 只要
+		// `video.canPlayType("application/vnd.apple.mpegurl")` 返回非空就走原生。
+		// 这在 Android Chromium 内核的浏览器上是一个陷阱：
+		//   canPlayType 返回的是 "maybe"（可能支持），不是 "probably"，更不是承诺。
+		//   实测 Android / 夸克 / UC 这类内核，原生播 HLS 时**视频轨正常、音频轨丢失**，
+		//   表现就是「画面流畅、完全无声」，且 video.muted=false、volume=1 都查不出问题。
+		//   因为它压根没解出音频，不是被静音了。
+		//
+		// 第一性原则：我们要的是「可靠的 HLS 播放」，不是「用浏览器原生的」。
+		//   - hls.js 用 MSE 逐片解封装，音视频同一套逻辑，跨内核行为一致，出问题也能
+		//     通过 ERROR 事件定位；
+		//   - 原生播放器的能力无法探测、无法干预，只能靠 canPlayType 猜 —— 猜错就是无声。
+		// 所以只要 hls.js 可用就一律用它。isSupported() 返回 false 的场合（iOS Safari
+		// 没有 MSE）才必须退回原生，那时原生实现是唯一选择，也是可靠的。
+		//
+		// 懒加载的收益不变：仍然只在「地址是 m3u8」时才拉那个 174 kB 的 chunk。
+		const needHlsJs = isHlsUrl(current.url);
 		if (needHlsJs) {
 			void import("hls.js")
 				.then((mod) => {
@@ -869,6 +912,44 @@ export default function Player(props: PlayerProps) {
 		}
 	}, []);
 
+	/**
+	 * 声音自检：一键把音量/静音拉回正常，并显示真实状态。
+	 *
+	 * 【为什么需要它】
+	 * 「有画面没声音」的成因分布在四个完全不同的层：
+	 *   ① 播放器被静音（muted）
+	 *   ② 音量被拖到 0
+	 *   ③ 浏览器自动播放策略强制静音
+	 *   ④ 播放内核压根没解出音频轨（Android 原生播 HLS 的典型症状）
+	 * ①②③ 这一键能修；④ 修不了，但能当场看出来 —— 音轨数为 0 就是片源问题。
+	 * 没有这个入口，用户只能反馈「没声音」，而上面四种原因的处理方式完全不同，
+	 * 等于永远在猜。
+	 */
+	const runAudioCheck = useCallback(() => {
+		const v = videoRef.current;
+		if (!v) return;
+		const wasMuted = v.muted;
+		const wasVolume = v.volume;
+		// 用户点击本身就是「允许播放」的手势，此时取消静音不会被策略拦
+		v.muted = false;
+		v.volume = 1;
+		if (v.paused) void v.play().catch(() => undefined);
+
+		const tracks = (v as HTMLVideoElement & { audioTracks?: { length: number } }).audioTracks;
+		const n = tracks ? tracks.length : -1;
+		const engineLabel =
+			engine === "hls" ? "hls.js" : engine === "native" ? "浏览器原生" : "未开始";
+		const parts = [
+			"内核 " + engineLabel,
+			"音轨 " + (n >= 0 ? n + " 条" : "未知"),
+			"静音 " + (wasMuted ? "是→已关" : "否"),
+			"音量 " + Math.round(wasVolume * 100) + "%→100%",
+		];
+		if (n === 0) parts.push("⚠ 无音频轨，属片源本身问题");
+		else if (engine === "native" && isHlsUrl(current?.url ?? "")) parts.push("⚠ 原生内核播 HLS，建议重载");
+		setAudioDiag(parts.join(" · "));
+	}, [engine, current?.url]);
+
 	const switchLine = useCallback(() => {
 		if (candidates.length < 2) return;
 		manualRef.current = true; // 手动换线不计入源质量统计
@@ -1083,6 +1164,14 @@ export default function Player(props: PlayerProps) {
 				<button type="button" className="pill" onClick={toggleFullscreen}>
 					全屏
 				</button>
+				<button
+					type="button"
+					className={"pill" + (audioDiag ? " on" : "")}
+					onClick={runAudioCheck}
+					title="把音量与静音拉回正常，并显示播放内核与音轨数量。若音轨显示 0 条，说明该片源本身没有音频。"
+				>
+					声音自检
+				</button>
 				<span className="header-spacer" />
 				{props.onPrev && (
 					<button type="button" className="pill" onClick={props.onPrev}>
@@ -1095,6 +1184,15 @@ export default function Player(props: PlayerProps) {
 					</button>
 				)}
 			</div>
+
+			{audioDiag && (
+				<div className="player-diag">
+					<span className="player-diag-text">{audioDiag}</span>
+					<button type="button" className="pill" onClick={() => setAudioDiag("")}>
+						知道了
+					</button>
+				</div>
+			)}
 		</div>
 	);
 }

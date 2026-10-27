@@ -1106,6 +1106,30 @@ textarea {
 	margin-top: var(--s-3);
 }
 
+/* 声音自检的结果条：跨行显示在播放条下方。
+   flex-wrap 的父容器里，width:100% 让它独占一行，不与按钮挤在一起。 */
+.player-diag {
+	display: flex;
+	align-items: center;
+	gap: var(--s-2);
+	flex-wrap: wrap;
+	margin-top: var(--s-2);
+	padding: var(--s-2) var(--s-3);
+	width: 100%;
+	background: var(--panel);
+	border: 1px solid var(--border);
+	border-radius: var(--r-md);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.player-diag-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	color: var(--muted);
+	word-break: break-word;
+}
+
 .player-select {
 	background: var(--panel);
 	color: var(--text);
