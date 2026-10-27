@@ -212,6 +212,16 @@ export default function Player(props: PlayerProps) {
 	/** 同理：倒计时的 effect 不该因为父组件每次渲染传新函数而重跑 */
 	const onNextRef = useRef(props.onNext);
 	onNextRef.current = props.onNext;
+	/**
+	 * 自动播放策略导致播放器被强制静音。
+	 *
+	 * 浏览器要求用户先与页面交互，才允许有声自动播放。
+	 * 当 video.play() 被拦截时，tryPlay 会设 video.muted = true 绕过策略，
+	 * 但这个静音是浏览器强加的、不是用户意愿 —— 必须跟「用户主动点静音」区分开：
+	 *  ① 不能写进 localStorage（否则下次刷新也带静音，用户永远得手动取消）；
+	 *  ② 用户一旦与页面交互（点击 / 按键），应自动恢复声音。
+	 */
+	const autoMutedRef = useRef(false);
 	const skipRef = useRef<SkipMark>({});
 	const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	/** 预热下一集只在「临近结束」触发一次；Player 换集会重挂，所以普通 ref 就够 */
@@ -353,13 +363,45 @@ export default function Player(props: PlayerProps) {
 		}
 	}, []);
 
-	// 用户拖音量条 / 点静音也要记住
+	// 用户拖音量条 / 点静音也要记住 —— 但浏览器自动播放策略导致的静音不算用户意愿，不能存
 	useEffect(() => {
 		const v = videoRef.current;
 		if (!v) return;
-		const onVolume = () => savePrefs({ volume: v.volume, muted: v.muted });
+		const onVolume = () => {
+			if (autoMutedRef.current) return; // 自动静音不落盘
+			savePrefs({ volume: v.volume, muted: v.muted });
+		};
 		v.addEventListener("volumechange", onVolume);
 		return () => v.removeEventListener("volumechange", onVolume);
+	}, []);
+
+	// -------------------------------------------------- 恢复声音（自动播放策略）
+	// 浏览器的自动播放策略：页面没有用户交互前，video.play() 只允许静音播放。
+	// 上面 tryPlay 被拦截后会设 video.muted = true，画面出来了但没声音。
+	// 这里在用户首次与页面交互（点击 / 按键 / 触摸播放器）后自动取消静音。
+	//
+	// 用 capture 阶段监听：播放器内部的 <video controls> 点击事件可能被 stopPropagation，
+	// capture 能在它到达目标之前就拿到，确保不被吞掉。
+	useEffect(() => {
+		const unmute = () => {
+			if (!autoMutedRef.current) return;
+			autoMutedRef.current = false;
+			const v = videoRef.current;
+			if (v && !v.muted) return; // 已经被用户手动取消了
+			if (v) {
+				v.muted = false;
+				// 取消静音后主动存一次正确的偏好（volume 没变，muted=false）
+				savePrefs({ muted: false });
+			}
+		};
+
+		// pointerdown 覆盖鼠标点击和触摸；keydown 覆盖键盘操作
+		window.addEventListener("pointerdown", unmute, { capture: true });
+		window.addEventListener("keydown", unmute, { capture: true });
+		return () => {
+			window.removeEventListener("pointerdown", unmute, { capture: true });
+			window.removeEventListener("keydown", unmute, { capture: true });
+		};
 	}, []);
 
 	// -------------------------------------------------------------- 挂载媒体
@@ -369,6 +411,9 @@ export default function Player(props: PlayerProps) {
 
 		let disposed = false;
 		recoverRef.current = 0;
+		// 切集/换线路/换片源时重置自动静音标记：
+		// 新的媒体可能再次被自动播放策略拦截，需要让 unmute effect 重新生效
+		autoMutedRef.current = false;
 		// 手动换线时保持「已上报」状态，让本次挂载不再上报（manualRef 读后即清）
 		reportedRef.current = manualRef.current;
 		manualRef.current = false;
@@ -423,7 +468,13 @@ export default function Player(props: PlayerProps) {
 			const p = video.play();
 			if (p && typeof p.catch === "function") {
 				p.catch(() => {
-					// 自动播放策略拦截：先静音重试，再不行就提示点击
+					// 自动播放策略拦截：先静音重试，再不行就提示点击。
+					// 这里的静音是浏览器强制的、不是用户意愿 —— 用 autoMutedRef 标记，
+					// 既阻止它写进 localStorage，又让用户首次交互时能自动恢复声音。
+					// （如果用户偏好本身就是静音，video.muted 已经是 true，
+					//  play() 不会被自动播放策略拒绝，不会走到这里。）
+					const wasUnmuted = !video.muted;
+					autoMutedRef.current = wasUnmuted;
 					video.muted = true;
 					video.play().catch(() => setNeedTap(true));
 				});
