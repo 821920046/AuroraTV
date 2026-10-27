@@ -79,9 +79,9 @@ const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
  */
 const PREFS_KEY = "aurora:player:prefs";
 
-type Prefs = { speed: number; volume: number; muted: boolean };
+type Prefs = { speed: number; volume: number };
 
-const DEFAULT_PREFS: Prefs = { speed: 1, volume: 1, muted: false };
+const DEFAULT_PREFS: Prefs = { speed: 1, volume: 1 };
 
 function loadPrefs(): Prefs {
 	if (typeof window === "undefined") return DEFAULT_PREFS;
@@ -93,7 +93,6 @@ function loadPrefs(): Prefs {
 			// 逐项校验：localStorage 是用户可改的，脏数据不能让播放器崩掉
 			speed: typeof p.speed === "number" && p.speed > 0 && p.speed <= 4 ? p.speed : 1,
 			volume: typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1 ? p.volume : 1,
-			muted: p.muted === true,
 		};
 	} catch {
 		return DEFAULT_PREFS;
@@ -346,11 +345,15 @@ export default function Player(props: PlayerProps) {
 	);
 
 	// -------------------------------------------------------------- 恢复播放偏好
-	// 刻意放在「挂载媒体」effect 之前：先把 muted / volume 设好，
-	// 媒体那边的 tryPlay() 才拿得到正确的初始状态 —— 上次静音的用户能直接自动播放，
-	// 不会被浏览器自动播放策略拦下。
-	// 也不能拿 localStorage 当 useState 的初始值：Player 会被 SSR 渲染一次，
-	// 那样会造成 hydration 前后不一致。
+	// 刻意放在「挂载媒体」effect 之前：先把 volume 设好，
+	// 媒体那边的 tryPlay() 才拿得到正确的初始状态。
+	//
+	// 【为什么不持久化 muted】
+	// 之前会把 muted 存进 localStorage，但浏览器自动播放策略导致的强制静音
+	// 也会触发 volumechange 并写进去 —— 于是用户一旦被自动静音过，
+	// localStorage 里就永久存了 muted:true，每次刷新都静音、每次都无声。
+	// 静音是临时状态（由自动播放策略管理），不需要跨会话记住。
+	// 用户想静音可以用 <video controls> 自带的静音按钮。
 	useEffect(() => {
 		const p = loadPrefs();
 		speedRef.current = p.speed;
@@ -358,18 +361,17 @@ export default function Player(props: PlayerProps) {
 		const v = videoRef.current;
 		if (v) {
 			v.volume = p.volume;
-			v.muted = p.muted;
 			v.playbackRate = p.speed;
 		}
 	}, []);
 
-	// 用户拖音量条 / 点静音也要记住 —— 但浏览器自动播放策略导致的静音不算用户意愿，不能存
+	// volume 变化时持久化（但自动静音不算用户意愿，不存）
 	useEffect(() => {
 		const v = videoRef.current;
 		if (!v) return;
 		const onVolume = () => {
-			if (autoMutedRef.current) return; // 自动静音不落盘
-			savePrefs({ volume: v.volume, muted: v.muted });
+			if (autoMutedRef.current) return;
+			savePrefs({ volume: v.volume });
 		};
 		v.addEventListener("volumechange", onVolume);
 		return () => v.removeEventListener("volumechange", onVolume);
@@ -387,12 +389,7 @@ export default function Player(props: PlayerProps) {
 			if (!autoMutedRef.current) return;
 			autoMutedRef.current = false;
 			const v = videoRef.current;
-			if (v && !v.muted) return; // 已经被用户手动取消了
-			if (v) {
-				v.muted = false;
-				// 取消静音后主动存一次正确的偏好（volume 没变，muted=false）
-				savePrefs({ muted: false });
-			}
+			if (v && v.muted) v.muted = false;
 		};
 
 		// pointerdown 覆盖鼠标点击和触摸；keydown 覆盖键盘操作
@@ -471,10 +468,7 @@ export default function Player(props: PlayerProps) {
 					// 自动播放策略拦截：先静音重试，再不行就提示点击。
 					// 这里的静音是浏览器强制的、不是用户意愿 —— 用 autoMutedRef 标记，
 					// 既阻止它写进 localStorage，又让用户首次交互时能自动恢复声音。
-					// （如果用户偏好本身就是静音，video.muted 已经是 true，
-					//  play() 不会被自动播放策略拒绝，不会走到这里。）
-					const wasUnmuted = !video.muted;
-					autoMutedRef.current = wasUnmuted;
+					autoMutedRef.current = true;
 					video.muted = true;
 					video.play().catch(() => setNeedTap(true));
 				});
