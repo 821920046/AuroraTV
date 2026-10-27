@@ -70,6 +70,7 @@ auroratv/
 │  │  └─ *.test.mts               # 零依赖单测（Node 内置 test runner）
 │  └─ middleware.ts               # 站长 Basic Auth + 安全响应头
 ├─ workers/scheduler/             # 独立 Cron 调度 Worker
+├─ workers/ia-adapter/             # 可选：Internet Archive → MacCMS 适配器（公共版权影片）
 ├─ migrations/                    # 0001 ~ 0007
 └─ .github/workflows/deploy.yml   # 先验证后部署
 ```
@@ -242,6 +243,10 @@ npx wrangler deploy
    想稳定可控，建议自建 MacCMS（开源软件）或接入自有的 Jellyfin / Emby 媒体库。
    导入后 `/api/cron/health` 会定期测活打分，坏源自动降权停用；播放失败时前端会自动换源重试。
    换句话说，项目能做的是**把可用的那部分筛出来、排到前面、坏了自动绕开**，而不是凭空变出内容。
+   **另有一个完全合法的选项**：`workers/ia-adapter/` 是个可选的适配器，把 Internet Archive 的
+   公共版权影片（默认收录 `silent_films`，3522 部影史经典）包装成 MacCMS 接口。
+   它不内含任何站点清单，只连一个非营利数字档案馆的公开接口；收录哪些合集由你决定。
+   代价是内容全是老片（1920 年代前后），且视频直链未经端到端验证，部署后请先点开一部片确认。
 9. **限流在 CGNAT 下是近似的**。已改为按 `ip | 客户端ID` 分桶缓解共用出口的相互挤占，
    但客户端 ID 可被清除，此时退回纯 IP 计数。真要精确配额需上 Durable Objects（付费）。
 10. **分片边缘缓存接受一个有界风险**：若 CDN 对某个分片 URL 返回 200 + HTML 错误页，

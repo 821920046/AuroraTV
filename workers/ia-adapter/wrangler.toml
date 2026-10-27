@@ -1,0 +1,22 @@
+name = "auroratv-ia-adapter"
+main = "index.ts"
+compatibility_date = "2025-03-01"
+
+# 把 Internet Archive 的公共版权影片翻译成 MacCMS 协议，
+# 让它们能作为一个普通片源加进 AuroraTV 后台。
+#
+# 部署：见同目录 README.md
+#   cd workers/ia-adapter && npx wrangler deploy
+
+[vars]
+# 收录哪些合集。格式：`显示名:collection_id,显示名:collection_id`
+#
+# 默认只开 silent_films —— 实测它是唯一「头部内容干净且是影史经典」的合集：
+#   silent_films   3522 项  《歌剧魅影》1925、《海底两万里》1916、《卡里加里博士》1919
+#
+# 其它合集务必先自己看过头再开。Internet Archive 没有内容分级过滤：
+#   short_films    3137 项  ❌ 头部就是色情 exploitation 片
+#   SciFi_Horror    950 项  有经典，但混了 exploitation 片
+#   prelinger      10461 项  科教/工业片，不是给人看的
+#   feature_films 28528 项  ❌ 噪声极大，头部是各语言版《耶稣传》
+IA_COLLECTIONS = "经典电影:silent_films"
