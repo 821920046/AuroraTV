@@ -342,13 +342,21 @@ test("TokenMinter：同一前缀只铸一次令牌（500 片列表只做 1 次 H
 });
 
 test("TokenMinter：图片与流的令牌分开缓存，互不串用", async () => {
-	// 回归保护：两者网格不同（6h vs 1h），同一个 host 签出来的令牌必须不同。
-	// 共用一张缓存表时，其中一类会拿到另一类的令牌 —— 表现为海报 URL
-	// 照样每小时变，或直播看到一半 403，且极难定位。
+	// 回归保护：共用一张缓存表时，其中一类会拿到另一类的令牌 ——
+	// 表现为海报 URL 照样每小时变，或直播看到一半 403，且极难定位。
+	//
+	// 【为什么流地址必须放在子目录里】
+	// 图片走 hostPrefix（origin + "/"），流走 urlPrefix（origin + 目录）。
+	// 若流地址直接放在根目录（如 /a.ts），两者前缀就完全一样了，
+	// 而 exp 又都是「网格起点 + 12h」：在 6 小时网格的【第一个小时】内，
+	// 1h 网格起点恰好等于 6h 网格起点 —— 于是 exp 相同、签名相同、令牌相同。
+	// 这是预期行为（同 prefix 同 exp 同签名），不是串用，但会让本断言
+	// 每天有一个小时的窗口内必然失败。放在 /vod/ 子目录后前缀不同，
+	// 令牌必然不同，用例才与时钟无关。
 	const minter = new TokenMinter(SECRET);
 	const tokenOf = (u: string) => new URL(u, "https://x").searchParams.get("t") ?? "";
 	const img = tokenOf(await minter.imageUrl("https://pic.example.com/a.jpg"));
-	const stream = tokenOf(await minter.streamUrl("https://pic.example.com/a.ts"));
+	const stream = tokenOf(await minter.streamUrl("https://pic.example.com/vod/a.ts"));
 	assert.notEqual(img, stream, "同一 host 的图片令牌与流令牌必须不同");
 
 	const imgExp = Number(img.split(".")[0]);
