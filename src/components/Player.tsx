@@ -215,6 +215,14 @@ export default function Player(props: PlayerProps) {
 	const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const stallRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const recoverRef = useRef(0);
+	/**
+	 * 当前候选地址内「无进展」被判定了几次。
+	 *
+	 * 与 recoverRef 分开：recoverRef 统计的是 hls.js 报的 fatal 错误，
+	 * 而卡死往往【不报错】—— 分片一直在重试，只是永远拉不下来。
+	 * 两者混用会让「卡死两次」被当成「还没用完自愈额度」继续干等。
+	 */
+	const stallCountRef = useRef(0);
 	const reportedRef = useRef(false);
 	/** 用户手动换线路时置位：手动换线不代表片源真实质量，不计入上报统计 */
 	const manualRef = useRef(false);
@@ -437,6 +445,7 @@ export default function Player(props: PlayerProps) {
 
 		let disposed = false;
 		recoverRef.current = 0;
+		stallCountRef.current = 0;
 		// 切集/换线路/换片源时重置自动静音标记：
 		// 新的媒体可能再次被自动播放策略拦截，需要让 unmute effect 重新生效
 		autoMutedRef.current = false;
@@ -476,8 +485,15 @@ export default function Player(props: PlayerProps) {
 				// 持续无进展 -> 先尝试自愈，再不行换线路
 				if (Date.now() - p.at > STALL_DEAD_MS) {
 					progressRef.current = { ...p, at: Date.now() };
-					if (hlsRef.current && recoverRef.current < MAX_RECOVER) {
-						recoverRef.current += 1;
+					stallCountRef.current += 1;
+					/*
+					 * 【为什么只给一次自愈机会】
+					 * startLoad() 只是把加载队列丢掉重来，如果卡住的原因是这个分片
+					 * 在源站本身就取不到，重来一次还是卡在同一个位置 ——
+					 * 用户于是再干等 12 秒。同一个位置连续两次拉不动，
+					 * 基本可以断定这条线路在这个点是坏的，直接换线路收益大得多。
+					 */
+					if (hlsRef.current && stallCountRef.current === 1) {
 						try {
 							hlsRef.current.startLoad();
 						} catch {
@@ -632,8 +648,15 @@ export default function Player(props: PlayerProps) {
 				manifestLoadingTimeOut: 8000,
 				manifestLoadingMaxRetry: 2,
 				levelLoadingMaxRetry: 3,
-				fragLoadingTimeOut: 15000,
-				fragLoadingMaxRetry: 4,
+				/*
+				 * 【分片重试次数从 4 降到 2】
+				 * hls.js 的重试是「指数退避」的，4 次 15 秒超时加起来最坏能让画面
+				 * 静止一分多钟 —— 而它期间【不报错】，只表现为无限转圈。
+				 * 2 次之后仍失败就会升级成 fatal 错误，走我们已有的换线路 / 换片源链路。
+				 * 宁可快速换一条能用的线，也不要抱着一条坏线干等。
+				 */
+				fragLoadingTimeOut: 10000,
+				fragLoadingMaxRetry: 2,
 				startLevel: -1,
 			});
 			hlsRef.current = hls;
