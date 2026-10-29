@@ -9,7 +9,7 @@ import {
 	makeSourceId,
 	type VideoSource,
 } from "@/lib/sources";
-import { getSourceHealthMap, clearSourceAutoDisabled } from "@/lib/db";
+import { getPlayStats, getSourceHealthMap, clearSourceAutoDisabled } from "@/lib/db";
 import { runHealthCheck, runCorsCheck } from "@/lib/health";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +23,9 @@ export async function GET() {
 	if (!env.AURORA_DB) return noDb();
 	const sources = await getAllSources(env.AURORA_DB);
 	const health = await getSourceHealthMap(env.AURORA_DB);
+	// 真实播放成败。接口探活好看不代表片子拉得动 ——
+	// 这一列才是「这个源到底能不能看」的一手证据，选源评分也已纳入它。
+	const play = await getPlayStats(env.AURORA_DB, 7);
 	return NextResponse.json({
 		code: 200,
 		sources: sources.map((s) => ({
@@ -34,6 +37,8 @@ export async function GET() {
 			fail_streak: health[s.id]?.fail_streak ?? 0,
 			last_ok_at: health[s.id]?.last_ok_at ?? null,
 			cors: health[s.id]?.cors ?? null,
+			play_rate: play[s.id]?.rate ?? null,
+			play_samples: play[s.id]?.samples ?? null,
 		})),
 	});
 }

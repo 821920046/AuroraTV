@@ -7,7 +7,7 @@
 //  - 一旦探测到恢复，立刻把被自动停用的源重新启用。
 //  - 分批探活（最久未检测优先），控制单次请求的子请求数，兼容 Cloudflare 免费版 50 子请求上限。
 import { computeScore } from "./scoring";
-import { getProbeTargets, upsertSourceHealth, upsertSourceCors } from "./db";
+import { getPlayStats, getProbeTargets, upsertSourceHealth, upsertSourceCors } from "./db";
 import { setSourceEnabled } from "./sources";
 import { pickPlayGroup } from "./aggregator";
 
@@ -35,6 +35,9 @@ export async function runHealthCheck(
 	const now = Date.now();
 
 	const targets = await getProbeTargets(db, limit);
+	// 真实播放成败（最近 7 天）。读一次给所有源共用 —— 探活是 cron 任务，
+	// 一次查询换「评分里包含播放质量」，比每个源单独查一遍划算得多。
+	const playStats = await getPlayStats(db, 7);
 	let disabled = 0;
 	let recovered = 0;
 
@@ -60,7 +63,16 @@ export async function runHealthCheck(
 			}
 			const successRate = ok / probes;
 			const avg = Math.round(totalMs / probes);
-			const score = computeScore({ successRate, avgLatencyMs: avg, timeouts });
+			// 把真实播放成败并进评分：接口快不代表片子拉得动。
+			// 没有播放样本时 playFactor 为 1，评分与旧版完全一致。
+			const ps = playStats[s.id];
+			const score = computeScore({
+				successRate,
+				avgLatencyMs: avg,
+				timeouts,
+				playRate: ps?.rate ?? null,
+				playSamples: ps?.samples ?? 0,
+			});
 
 			const failStreak = successRate === 0 ? (s.fail_streak ?? 0) + 1 : 0;
 			let autoDisabled = s.auto_disabled ?? 0;

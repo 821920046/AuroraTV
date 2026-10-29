@@ -196,3 +196,63 @@ export async function clearSourceAutoDisabled(db: D1Database, id: string): Promi
 		console.error("clearSourceAutoDisabled failed:", e);
 	}
 }
+
+// ===== 真实播放质量 =====
+//
+// 【这张表曾经是死数据】
+// play_stat 由 /api/sources 的 POST 在每次播放成功/失败时累加，但它从来没被读过 ——
+// 选源只看 source_health.score，而那个分完全由「?ac=list 接口探活」算出来。
+// 后果是一个源可以接口 50ms 秒回、CORS 正常，评分满分被优先选中，
+// 而它的视频文件其实放在一台慢服务器上，十次播放八次卡死。
+// 用户感受到的「源不专业」，在代码里就是这个缺口。
+
+export type PlayStat = {
+	/** 窗口内播放成功次数 */
+	ok: number;
+	/** 窗口内播放失败次数 */
+	fail: number;
+	/** 成功率 0..1 */
+	rate: number;
+	/** 样本总数（ok + fail），用于置信度加权 */
+	samples: number;
+};
+
+/**
+ * 读最近 days 天的播放成败聚合。
+ *
+ * 用 `day >= 'YYYY-MM-DD'` 做窗口：day 是定长 ISO 日期字符串，
+ * 字典序与时间序一致，可以直接比较，不需要解析成时间戳。
+ *
+ * 任何异常都返回空对象 —— 播放统计缺失时选源要退化成旧行为，绝不能把搜索拖挂。
+ */
+export async function getPlayStats(
+	db: D1Database,
+	days = 7,
+): Promise<Record<string, PlayStat>> {
+	try {
+		const since = new Date(Date.now() - Math.max(1, days) * 86400_000).toISOString().slice(0, 10);
+		const { results } = await db
+			.prepare(
+				`SELECT source_id, SUM(ok) AS ok, SUM(fail) AS fail
+				 FROM play_stat
+				 WHERE day >= ?1
+				 GROUP BY source_id`,
+			)
+			.bind(since)
+			.all<{ source_id: string; ok: number | null; fail: number | null }>();
+
+		const out: Record<string, PlayStat> = {};
+		for (const r of results ?? []) {
+			const ok = Number(r.ok) || 0;
+			const fail = Number(r.fail) || 0;
+			const samples = ok + fail;
+			if (samples <= 0) continue;
+			out[r.source_id] = { ok, fail, samples, rate: ok / samples };
+		}
+		return out;
+	} catch (e) {
+		// 迁移 0006 未执行时表不存在，静默降级
+		console.error("getPlayStats failed:", e);
+		return {};
+	}
+}

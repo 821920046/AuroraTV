@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { getSourceHealthMap } from "@/lib/db";
+import { getPlayStats, getSourceHealthMap } from "@/lib/db";
 import { getEnabledSources } from "@/lib/sources";
 import { checkRateLimit, rateLimitedResponse } from "@/lib/ratelimit";
 
@@ -12,6 +12,9 @@ export async function GET(req: NextRequest) {
 
 	const { env } = getCloudflareContext();
 	const health = env.AURORA_DB ? await getSourceHealthMap(env.AURORA_DB) : {};
+	// 真实播放成败。这是「这个源到底能不能看」唯一的一手证据，
+	// 接口延迟再好看也替代不了 —— 一并暴露给后台和诊断面板。
+	const play = env.AURORA_DB ? await getPlayStats(env.AURORA_DB, 7) : {};
 	const sources = await getEnabledSources(env.AURORA_DB);
 	const out = sources.map((s) => ({
 		id: s.id,
@@ -20,6 +23,10 @@ export async function GET(req: NextRequest) {
 		success_rate: health[s.id]?.success_rate ?? null,
 		avg_latency_ms: health[s.id]?.avg_latency_ms ?? null,
 		cors: health[s.id]?.cors ?? null,
+		/** 最近 7 天播放成功率 0..1；null = 没有样本 */
+		play_rate: play[s.id]?.rate ?? null,
+		/** 样本量：太少时 play_rate 不可当真 */
+		play_samples: play[s.id]?.samples ?? null,
 	}));
 	return NextResponse.json({ code: 200, sources: out });
 }

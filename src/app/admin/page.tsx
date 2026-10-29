@@ -15,6 +15,10 @@ type SourceItem = {
 	fail_streak?: number;
 	last_ok_at?: number | null;
 	cors?: number | null;
+	/** 最近 7 天真实播放成功率 0..1；null = 没有样本 */
+	play_rate?: number | null;
+	/** 播放上报样本量，太少时 play_rate 不可当真 */
+	play_samples?: number | null;
 };
 
 export default function Admin() {
@@ -352,6 +356,7 @@ export default function Admin() {
 										<th>名称</th>
 										<th>API</th>
 										<th>评分</th>
+										<th>播放成功率</th>
 										<th>网页可播</th>
 										<th>状态</th>
 										<th />
@@ -363,6 +368,18 @@ export default function Admin() {
 											<td>{s.name}</td>
 											<td className="api-cell">{s.api}</td>
 											<td>{s.score != null ? s.score.toFixed(2) : "—"}</td>
+											<td title={
+												s.play_samples
+													? `最近 7 天 ${s.play_samples} 次播放上报`
+													: "还没有播放上报，样本不足"
+											}>
+												{s.play_rate != null
+													? Math.round(s.play_rate * 100) + "%"
+													: "—"}
+												{s.play_samples != null && s.play_samples < 5 ? (
+													<span className="muted"> 样本少</span>
+												) : null}
+											</td>
 											<td>{s.cors === 1 ? "🌐 可播" : s.cors === 0 ? "📋 仅VLC" : "—"}</td>
 											<td>
 												<button

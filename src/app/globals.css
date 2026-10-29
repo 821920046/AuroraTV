@@ -1908,3 +1908,9 @@ textarea {
 .perf-diag-verdict.is-bad {
 	color: var(--danger);
 }
+
+/* 弱化的补充说明文字（如「样本少」这类限定语） */
+.muted {
+	color: var(--muted);
+	font-size: 11px;
+}
