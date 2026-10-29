@@ -73,6 +73,10 @@ export async function HEAD(req: NextRequest): Promise<Response> {
 }
 
 async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Response> {
+	// 分段计时，只为 `server-timing` 响应头服务。手机端排查「海报为什么慢」时，
+	// 浏览器只能看到 TTFB 一个总数 —— 分不清是 Worker 自己慢（验签/限流/DoH）
+	// 还是上游图床慢。把两段拆开暴露出来，前端诊断面板就能直接归因。
+	const t0 = Date.now();
 	const target = req.nextUrl.searchParams.get("u");
 	const token = req.nextUrl.searchParams.get("t");
 	if (!target) return err(400, "missing u");
@@ -86,6 +90,7 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 	const rl = await checkRateLimit(req);
 	if (rl.limited) return rateLimitedResponse(rl, HEADERS);
 
+	const tFetch = Date.now();
 	const got = await guardedFetch(target, {
 		method,
 		headers: (u) => upstreamHeaders(u, { accept: "image/avif,image/webp,image/*,*/*;q=0.8" }),
@@ -105,6 +110,7 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 		 */
 		cf: { cacheEverything: true, cacheTtl: 86400 },
 	});
+	const upstreamMs = Date.now() - tFetch;
 	if (!got.ok) return err(502, "image " + got.error);
 	const upstream = got.res;
 	if (!upstream.ok) return err(upstream.status === 404 ? 404 : 502, "image " + upstream.status);
@@ -134,6 +140,19 @@ async function handle(req: NextRequest, method: "GET" | "HEAD"): Promise<Respons
 
 	const out = new Headers(HEADERS);
 	out.set("content-type", ct);
+	/*
+	 * 耗时拆解，供页面内的诊断面板读取（`?diag=1`）。
+	 *
+	 * upstream = 回源（含逐跳重定向）耗时；worker = 验签 + 限流 + DoH + 其余开销。
+	 * 两个数一比就能归因：
+	 *   - upstream 占大头  -> 图床慢，代码无解，只能换图床或上图片压缩
+	 *   - worker 占大头    -> 是我们的问题，去查 DoH 冷启动 / 限流
+	 * 注意 Server-Timing 默认对跨域请求不可见，这里同源所以不受限。
+	 */
+	out.set(
+		"server-timing",
+		"upstream;dur=" + upstreamMs + ", worker;dur=" + Math.max(0, Date.now() - t0 - upstreamMs),
+	);
 	// 刻意【不透传 content-length】：Workers 的 fetch 会自动解压 gzip/br 并移除
 	// content-encoding，但 content-length 仍是压缩前的长度。原样回传会让浏览器按
 	// 旧长度截断图片（表现为「图裂了一半」），而分块传输没有任何副作用。

@@ -26,6 +26,28 @@ export type HeaderVariant = "browser" | "noreferer" | "mobile";
 
 export const HEADER_LADDER: HeaderVariant[] = ["browser", "noreferer", "mobile"];
 
+/**
+ * 把「上次成功的档位」提到梯子最前面，其余保持原顺序。
+ *
+ * 【为什么需要它】
+ * 梯子本身是「从最可能成功的一档往下试」。但对某个具体源站来说，能用的
+ * 往往只有一档 —— 如果那一档不是 "browser"，那么【每一个分片请求】都要先被
+ * 拒一次才轮到它。分片是播放的最热路径（一集几百个），这个重复失败会
+ * 直接变成观感上的「一直转圈」。
+ *
+ * 做成纯函数而不是在路由里内联：状态（记住谁）由调用方维护，
+ * 顺序规则可以独立测试，也避免两个端点各写一份。
+ */
+export function ladderWith(
+	remembered: HeaderVariant | undefined,
+	ladder: HeaderVariant[] = HEADER_LADDER,
+): HeaderVariant[] {
+	if (!remembered) return ladder;
+	// remembered 不在 ladder 里也照样放最前：它来自同一个枚举，
+	// 但调用方可能传了自定义梯子，这里不做假设。
+	return [remembered, ...ladder.filter((v) => v !== remembered)];
+}
+
 export function upstreamHeaders(
 	targetUrl: string,
 	extra?: Record<string, string>,
