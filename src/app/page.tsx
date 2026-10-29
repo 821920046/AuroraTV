@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Player from "@/components/Player";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import SiteHeader from "@/components/SiteHeader";
+import PerfDiag from "@/components/PerfDiag";
 
 // ============================================================================
 // 首页：搜索 -> 选片 -> 选集 -> 播放
@@ -161,6 +162,21 @@ export default function HomePage() {
 
 	const [home, setHome] = useState<{ movies: Item[]; tv: Item[] } | null>(null);
 	const [homeLoading, setHomeLoading] = useState(true);
+
+	/**
+	 * 性能诊断浮层开关：地址栏带 `?diag=1` 才打开。
+	 *
+	 * 必须在 effect 里读 location —— 首页会被 SSR 渲染一次，
+	 * 直接拿 window 当 useState 初值会让 hydration 前后不一致。
+	 */
+	const [diag, setDiag] = useState(false);
+	useEffect(() => {
+		try {
+			setDiag(new URLSearchParams(window.location.search).get("diag") === "1");
+		} catch {
+			/* 拿不到 location 就当没开 */
+		}
+	}, []);
 
 	const [play, setPlay] = useState<PlayData | null>(null);
 	const [playLoading, setPlayLoading] = useState(false);
@@ -819,6 +835,9 @@ export default function HomePage() {
 					仅供个人学习与测试，请支持正版
 				</footer>
 			</main>
+
+			{/* 诊断浮层只在地址栏带 ?diag=1 时出现，正常访问完全不挂载 */}
+			{diag ? <PerfDiag /> : null}
 		</>
 	);
 }

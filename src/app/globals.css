@@ -1794,3 +1794,117 @@ textarea {
 		animation: none;
 	}
 }
+
+/* ============================================================ 性能诊断浮层 */
+/*
+ * 只在 `?diag=1` 时挂载，正常访问完全不存在这个节点。
+ * 刻意不用 backdrop-filter：这个面板本身是来测性能的，
+ * 让它自己触发一层全屏合成/模糊会污染测量结果。
+ */
+.perf-diag {
+	position: fixed;
+	left: var(--s-2);
+	right: var(--s-2);
+	bottom: var(--s-2);
+	z-index: var(--z-overlay);
+	max-height: 42vh;
+	overflow-y: auto;
+	padding: var(--s-3);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--r-md);
+	background: #0b1120;
+	box-shadow: var(--sh-2);
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--text-2);
+	/* 面板自己不参与滚动链，避免在播放页误触发页面的下拉刷新 */
+	overscroll-behavior: contain;
+}
+
+.perf-diag-head {
+	display: flex;
+	align-items: center;
+	gap: var(--s-2);
+	margin-bottom: var(--s-2);
+}
+
+.perf-diag-head strong {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text);
+}
+
+.perf-diag-hint {
+	font-size: 11px;
+	color: var(--muted-2);
+}
+
+.perf-diag-close {
+	margin-left: auto;
+	padding: 2px var(--s-2);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--r-full);
+	background: transparent;
+	color: var(--text-2);
+	font-size: 11px;
+	line-height: 1.6;
+	cursor: pointer;
+}
+
+.perf-diag-close:hover {
+	color: var(--text);
+	border-color: var(--text-2);
+}
+
+.perf-diag-empty {
+	margin: 0;
+	color: var(--muted);
+}
+
+.perf-diag-row {
+	padding-top: var(--s-2);
+	border-top: 1px solid var(--border);
+}
+
+.perf-diag-row + .perf-diag-row {
+	margin-top: var(--s-2);
+}
+
+.perf-diag-name {
+	margin-bottom: 2px;
+	font-weight: 600;
+	color: var(--text);
+}
+
+.perf-diag-nums {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--s-3);
+	/* 等宽数字：每秒刷新时数字不会左右跳 */
+	font-variant-numeric: tabular-nums;
+}
+
+.perf-diag-nums b {
+	font-weight: 600;
+	color: var(--text);
+}
+
+.perf-diag-bytes {
+	color: var(--muted-2);
+}
+
+.perf-diag-verdict {
+	margin-top: var(--s-1);
+}
+
+.perf-diag-verdict.is-ok {
+	color: var(--ok);
+}
+
+.perf-diag-verdict.is-warn {
+	color: var(--warn);
+}
+
+.perf-diag-verdict.is-bad {
+	color: var(--danger);
+}
