@@ -21,6 +21,14 @@ type SourceItem = {
 	play_samples?: number | null;
 };
 
+/** 直播订阅源：一条 M3U 地址就是一条订阅，摄取后展开成 channel 表里的频道 */
+type LiveSourceItem = {
+	id: string;
+	name: string;
+	url: string;
+	enabled?: boolean;
+};
+
 export default function Admin() {
 	const [sources, setSources] = useState<SourceItem[]>([]);
 	const [msg, setMsg] = useState("");
@@ -35,6 +43,14 @@ export default function Admin() {
 	const [subUrl, setSubUrl] = useState("");
 	const [subText, setSubText] = useState("");
 
+	// ---- 直播订阅源 ----
+	const [liveSources, setLiveSources] = useState<LiveSourceItem[]>([]);
+	const [liveCount, setLiveCount] = useState(0);
+	const [liveMsg, setLiveMsg] = useState("");
+	const [liveBusy, setLiveBusy] = useState(false);
+	const [liveName, setLiveName] = useState("");
+	const [liveUrl, setLiveUrl] = useState("");
+
 	async function load() {
 		try {
 			const r = await fetch("/api/admin/sources");
@@ -46,8 +62,25 @@ export default function Admin() {
 		}
 	}
 
+	async function loadLive() {
+		try {
+			const r = await fetch("/api/admin/live");
+			const d = (await r.json()) as {
+				sources?: LiveSourceItem[];
+				channelCount?: number;
+				msg?: string;
+			};
+			setLiveSources(d.sources ?? []);
+			setLiveCount(d.channelCount ?? 0);
+			if (!r.ok && d.msg) setLiveMsg(d.msg);
+		} catch {
+			setLiveMsg("加载直播源失败");
+		}
+	}
+
 	useEffect(() => {
 		load();
+		loadLive();
 	}, []);
 
 	async function addSource() {
@@ -73,6 +106,82 @@ export default function Admin() {
 			}
 		} finally {
 			setBusy(false);
+		}
+	}
+
+	// ---- 直播订阅源操作 ----
+	// 直播侧的协议是「M3U 播放列表」而不是 MacCMS：一条订阅地址就是一份频道清单，
+	// 摄取(ingest) 之后展开成 channel 表里的频道。增删订阅源不会动已入库的频道，
+	// 要清理得单独点 prune 或清空 —— 所以下面把三个动作分开摆，避免误操作。
+	async function livePost(body: Record<string, unknown>, okMsg: string) {
+		setLiveBusy(true);
+		setLiveMsg("处理中…");
+		try {
+			const r = await fetch("/api/admin/live", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			const d = (await r.json()) as {
+				msg?: string;
+				inserted?: number;
+				updated?: number;
+				deleted?: number;
+			};
+			if (!r.ok) {
+				setLiveMsg("失败：" + (d.msg ?? r.status));
+				return;
+			}
+			if (body.action === "ingest") {
+				setLiveMsg(`摄取完成：新增 ${d.inserted ?? 0} 个频道，更新 ${d.updated ?? 0} 个`);
+			} else if (body.action === "prune") {
+				setLiveMsg(`已清理 ${d.deleted ?? 0} 个非白名单地区的频道`);
+			} else {
+				setLiveMsg(okMsg);
+			}
+			await loadLive();
+		} catch {
+			setLiveMsg("请求失败");
+		} finally {
+			setLiveBusy(false);
+		}
+	}
+
+	async function addLiveSource() {
+		if (!liveName.trim() || !liveUrl.trim()) {
+			setLiveMsg("名称和 M3U 地址必填");
+			return;
+		}
+		await livePost(
+			{ name: liveName.trim(), url: liveUrl.trim() },
+			"已添加订阅源 —— 还要点「立即摄取」才会真正拉取频道",
+		);
+		setLiveName("");
+		setLiveUrl("");
+	}
+
+	async function liveToggle(s: LiveSourceItem) {
+		setLiveBusy(true);
+		try {
+			await fetch("/api/admin/live", {
+				method: "PATCH",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ id: s.id, enabled: s.enabled === false }),
+			});
+			await loadLive();
+		} finally {
+			setLiveBusy(false);
+		}
+	}
+
+	async function liveDelete(id: string) {
+		setLiveBusy(true);
+		try {
+			const r = await fetch("/api/admin/live?id=" + encodeURIComponent(id), { method: "DELETE" });
+			setLiveMsg(r.ok ? "已删除订阅源" : "删除失败");
+			await loadLive();
+		} finally {
+			setLiveBusy(false);
 		}
 	}
 
@@ -403,6 +512,106 @@ export default function Admin() {
 								</tbody>
 							</table>
 						</div>
+					)}
+				</section>
+
+				<section className="admin-card">
+					<div className="card-head">
+						<h2>直播订阅源（{liveSources.length}）</h2>
+						<span className="muted">已入库频道 {liveCount} 个</span>
+					</div>
+					<p className="muted">
+						直播侧吃的是 M3U 播放列表，不是 MacCMS。加完地址要点「立即摄取」才会真正拉频道。
+						本项目只存频道元数据与可直连地址，不中转视频流。
+					</p>
+
+					<div className="field-row">
+						<div className="field">
+							<label>名称</label>
+							<input
+								className="admin-input"
+								value={liveName}
+								onChange={(e) => setLiveName(e.target.value)}
+								placeholder="如 iptv-org 中国"
+							/>
+						</div>
+						<div className="field">
+							<label>M3U 地址</label>
+							<input
+								className="admin-input"
+								value={liveUrl}
+								onChange={(e) => setLiveUrl(e.target.value)}
+								placeholder="https://iptv-org.github.io/iptv/countries/cn.m3u"
+							/>
+						</div>
+					</div>
+
+					<div className="field-row">
+						<button className="search-btn" onClick={addLiveSource} disabled={liveBusy}>
+							添加订阅源
+						</button>
+						<button
+							className="pill"
+							disabled={liveBusy}
+							onClick={() => livePost({ action: "ingest" }, "摄取完成")}
+						>
+							立即摄取
+						</button>
+						<button
+							className="pill"
+							disabled={liveBusy}
+							onClick={() => livePost({ action: "prune" }, "已清理")}
+							title="只保留国内/香港地区的频道，删掉其余"
+						>
+							清理非白名单地区
+						</button>
+					</div>
+
+					{liveMsg ? <p className="muted">{liveMsg}</p> : null}
+
+					{liveSources.length > 0 ? (
+						<div className="table-scroll">
+							<table className="admin-table">
+								<thead>
+									<tr>
+										<th>名称</th>
+										<th>M3U 地址</th>
+										<th>状态</th>
+										<th />
+									</tr>
+								</thead>
+								<tbody>
+									{liveSources.map((s) => (
+										<tr key={s.id}>
+											<td>{s.name}</td>
+											<td className="api-cell">{s.url}</td>
+											<td>
+												<button
+													className={"pill " + (s.enabled !== false ? "on" : "off")}
+													onClick={() => liveToggle(s)}
+													disabled={liveBusy}
+												>
+													{s.enabled !== false ? "启用" : "停用"}
+												</button>
+											</td>
+											<td>
+												<button
+													className="pill danger"
+													onClick={() => liveDelete(s.id)}
+													disabled={liveBusy}
+												>
+													删除
+												</button>
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+					) : (
+						<p className="muted">
+							还没有订阅源。留空时直播页会用内置默认源（含 iptv-org 中国）。
+						</p>
 					)}
 				</section>
 
