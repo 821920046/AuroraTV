@@ -1914,3 +1914,56 @@ textarea {
 	color: var(--muted);
 	font-size: 11px;
 }
+
+/* ---------------------------------------------------- 后台：推荐订阅源列表 */
+/*
+ * 一行一个源，名字与地址上下排，右侧一个添加按钮。
+ * 刻意不做成「一键全加」：推荐列表里既有广播机构公开的直播流，
+ * 也有民间聚合源，加哪些该由人逐条决定。
+ */
+.rec-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--s-2);
+	margin-top: var(--s-2);
+}
+
+/* 推荐源这一块紧跟在按钮行后面，需要自己撑开上边距，否则标签会贴住按钮 */
+.rec-field {
+	margin-top: var(--s-4);
+}
+
+.rec-item {
+	display: flex;
+	align-items: center;
+	gap: var(--s-3);
+	padding: var(--s-2) var(--s-3);
+	border: 1px solid var(--border);
+	border-radius: var(--r-sm);
+	background: var(--panel);
+}
+
+.rec-main {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	/* min-width: 0 是让下面的 ellipsis 真正生效的前提 ——
+	   flex 子项默认 min-width:auto，会被内容撑开，截断永远不会触发 */
+	min-width: 0;
+	flex: 1;
+}
+
+.rec-name {
+	font-size: 13px;
+	color: var(--text);
+}
+
+.rec-url {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rec-item .pill {
+	flex-shrink: 0;
+}

@@ -29,6 +29,13 @@ type LiveSourceItem = {
 	enabled?: boolean;
 };
 
+/** 后端内置的推荐订阅源。不含 keepAll 等摄取细节，那是服务端的事 */
+type RecommendedSource = {
+	id: string;
+	name: string;
+	url: string;
+};
+
 export default function Admin() {
 	const [sources, setSources] = useState<SourceItem[]>([]);
 	const [msg, setMsg] = useState("");
@@ -50,6 +57,7 @@ export default function Admin() {
 	const [liveBusy, setLiveBusy] = useState(false);
 	const [liveName, setLiveName] = useState("");
 	const [liveUrl, setLiveUrl] = useState("");
+	const [recommended, setRecommended] = useState<RecommendedSource[]>([]);
 
 	async function load() {
 		try {
@@ -68,10 +76,12 @@ export default function Admin() {
 			const d = (await r.json()) as {
 				sources?: LiveSourceItem[];
 				channelCount?: number;
+				recommended?: RecommendedSource[];
 				msg?: string;
 			};
 			setLiveSources(d.sources ?? []);
 			setLiveCount(d.channelCount ?? 0);
+			setRecommended(d.recommended ?? []);
 			if (!r.ok && d.msg) setLiveMsg(d.msg);
 		} catch {
 			setLiveMsg("加载直播源失败");
@@ -158,6 +168,19 @@ export default function Admin() {
 		);
 		setLiveName("");
 		setLiveUrl("");
+	}
+
+	/**
+	 * 添加一个推荐源。
+	 *
+	 * 传 id 而不是让后端 slugify(name)：推荐源的 id 是固定的（如 cn_iptv_org），
+	 * 用它才能和「已添加」的判断对上，也不会和 add_recommended 写出两条重复记录。
+	 */
+	async function addRecommended(r: RecommendedSource) {
+		await livePost(
+			{ id: r.id, name: r.name, url: r.url },
+			`已添加「${r.name}」—— 记得点「立即摄取」才会拉频道`,
+		);
 	}
 
 	async function liveToggle(s: LiveSourceItem) {
@@ -566,6 +589,33 @@ export default function Admin() {
 							清理非白名单地区
 						</button>
 					</div>
+
+					{recommended.length > 0 ? (
+						<div className="field rec-field">
+							<label>推荐源（逐个添加，不自动全加）</label>
+							<div className="rec-list">
+								{recommended.map((r) => {
+									const added = liveSources.some((s) => s.id === r.id);
+									return (
+										<div className="rec-item" key={r.id}>
+											<div className="rec-main">
+												<span className="rec-name">{r.name}</span>
+												<span className="muted rec-url">{r.url}</span>
+											</div>
+											<button
+												className="pill"
+												disabled={liveBusy || added}
+												onClick={() => addRecommended(r)}
+												title={added ? "这个源已经在列表里了" : "添加这条订阅"}
+											>
+												{added ? "已添加" : "添加"}
+											</button>
+										</div>
+									);
+								})}
+							</div>
+						</div>
+					) : null}
 
 					{liveMsg ? <p className="muted">{liveMsg}</p> : null}
 

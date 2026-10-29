@@ -26,7 +26,22 @@ export async function GET() {
 	if (!env.AURORA_DB) return noDb();
 	const sources = await getLiveSources(env.AURORA_DB);
 	const channelCount = await getChannelCount(env.AURORA_DB);
-	return NextResponse.json({ code: 200, sources, channelCount });
+	/*
+	 * 一并返回推荐源，让后台能「逐个添加」而不是「一键全加」。
+	 *
+	 * 为什么不给一键按钮：RECOMMENDED_CN_SOURCES 里除了 iptv-org（各国广播机构
+	 * 主动公开的直播流），还有几个民间聚合源 —— 它们可能夹带未授权转播。
+	 * 全加进去等于替站长做了「要不要接这些」的决定，那不该由代码替他做。
+	 * 逐个列出、各自一个按钮，加不加、加哪几个由人决定。
+	 *
+	 * keepAll 是服务端摄取时的地区过滤开关，前端用不到，不外传。
+	 */
+	const recommended = RECOMMENDED_CN_SOURCES.map((s) => ({
+		id: s.id,
+		name: s.name,
+		url: s.url,
+	}));
+	return NextResponse.json({ code: 200, sources, channelCount, recommended });
 }
 
 // POST 分两种：添加订阅源 {name,url}；或立即摄取 {action:"ingest"}
@@ -35,6 +50,7 @@ export async function POST(req: NextRequest) {
 	if (!env.AURORA_DB) return noDb();
 	const body = (await req.json().catch(() => ({}))) as {
 		action?: string;
+		id?: string;
 		name?: string;
 		url?: string;
 	};
@@ -63,8 +79,11 @@ export async function POST(req: NextRequest) {
 
 	if (!body.name || !body.url)
 		return NextResponse.json({ code: 400, msg: "name 和 url 为必填" }, { status: 400 });
+	// 允许显式传 id：推荐源用它自己的固定 id（如 cn_iptv_org），
+	// 这样「已添加」的判断和 add_recommended 写进去的是同一条记录，
+	// 不会出现「点了一次添加，列表里却多出一条名字相似的重复项」。
 	const src: LiveSource = {
-		id: slugify(String(body.name)),
+		id: body.id ? String(body.id) : slugify(String(body.name)),
 		name: String(body.name),
 		url: String(body.url),
 		enabled: true,
