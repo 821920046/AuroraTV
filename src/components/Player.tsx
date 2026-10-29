@@ -64,8 +64,20 @@ export type PlayerProps = {
 type Candidate = { mode: "proxy" | "direct"; url: string };
 type Status = "idle" | "loading" | "ready" | "failed";
 
-const WATCHDOG_MS = 16000; // 首帧超时（有进度则不计）
+const WATCHDOG_MS = 10000; // 首帧超时（有进度则不计）
 const MAX_RECOVER = 3; // 同一候选地址内最多自愈次数
+
+/**
+ * 播放中「完全没进展」多久就判为卡死。
+ *
+ * 【为什么从 25s 收紧到 12s】
+ * 25 秒是拿「宁可等，不要误判」换来的，代价是用户面对的是一段没有任何反馈的死画面 ——
+ * 实测体感上超过 10 秒没动静，用户已经认为「卡住了」并开始戳屏幕。
+ * 12 秒足够扛过一次正常的网络抖动（hls.js 自己会在 15s 内重试分片），
+ * 又不至于让人干等到失去耐心。判死后走的是既有链路：先 startLoad() 自愈，
+ * 再不行换备用线路 / 换片源，不会让用户一直盯着黑屏。
+ */
+const STALL_DEAD_MS = 12000;
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
 
 // ---------------------------------------------------------------- 播放偏好
@@ -461,8 +473,8 @@ export default function Player(props: PlayerProps) {
 					progressRef.current = { t: v.currentTime, buffered, at: Date.now() };
 					return;
 				}
-				// 持续 25s 无任何进展 -> 先尝试自愈，再不行换线路
-				if (Date.now() - p.at > 25000) {
+				// 持续无进展 -> 先尝试自愈，再不行换线路
+				if (Date.now() - p.at > STALL_DEAD_MS) {
 					progressRef.current = { ...p, at: Date.now() };
 					if (hlsRef.current && recoverRef.current < MAX_RECOVER) {
 						recoverRef.current += 1;
@@ -475,7 +487,7 @@ export default function Player(props: PlayerProps) {
 						failCandidate("播放长时间卡住，上游可能已断流");
 					}
 				}
-			}, 5000);
+			}, 3000);
 		};
 
 		const tryPlay = () => {
@@ -590,12 +602,37 @@ export default function Player(props: PlayerProps) {
 				enableWorker: true,
 				lowLatencyMode: false,
 				backBufferLength: 60,
-				maxBufferLength: 30,
-				maxMaxBufferLength: 90,
-				manifestLoadingTimeOut: 12000,
-				manifestLoadingMaxRetry: 3,
+				/*
+				 * 【缓冲目标 30s -> 60s】
+				 * maxBufferLength 是「预取到多少秒就停下来等」的目标值，不是内存上限。
+				 * 30 秒在桌面宽带下够用，但在移动网络里几乎等于没有余量：
+				 * 4G 的一次速率下跌（电梯、地铁、切换基站）持续十几秒很常见，
+				 * 30 秒的目标缓冲意味着网络一抖就立刻耗尽，表现为画面一卡一卡。
+				 * 60 秒能吸收掉这类抖动，而 maxBufferSize（hls.js 默认 60MB）
+				 * 仍然是硬上限，不会把低端机的内存吃爆。
+				 */
+				maxBufferLength: 60,
+				maxMaxBufferLength: 120,
+				/*
+				 * 【按播放器实际尺寸封顶码率】
+				 * 手机竖屏播放器只有 ~390px 宽，而多档清单里最高档常是 1080p。
+				 * 不封顶时 hls.js 只看带宽估算，WiFi 一旦跑出高带宽就锁到最高档，
+				 * 之后带宽回落要等 ABR 慢慢降 —— 这中间就是「明明网不差却一直转圈」。
+				 * 开了它，码率上限直接按渲染尺寸裁掉，等于提前砍掉一半的解码与带宽压力。
+				 * 单码率源（采集站常见）不受影响，因为只有一档可封。
+				 */
+				capLevelToPlayerSize: true,
+				/*
+				 * 【超时收紧，让失败更快暴露】
+				 * 12s/25s 的组合意味着弱网下最坏要等 12 + 3×12 = 48 秒才判定清单拉不到。
+				 * 用户看到的就是「点了播放，一直转圈」。
+				 * 清单只有几十 KB，8 秒拿不到基本就是源站有问题；
+				 * 分片 15 秒同理。快速失败才能走到既有的自动换线路 / 换片源链路。
+				 */
+				manifestLoadingTimeOut: 8000,
+				manifestLoadingMaxRetry: 2,
 				levelLoadingMaxRetry: 3,
-				fragLoadingTimeOut: 25000,
+				fragLoadingTimeOut: 15000,
 				fragLoadingMaxRetry: 4,
 				startLevel: -1,
 			});

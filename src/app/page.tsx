@@ -121,7 +121,18 @@ function fmtTime(s: number): string {
 	return (h > 0 ? pad(h) + ":" : "") + pad(m) + ":" + pad(sec);
 }
 
-function Poster({ src, alt }: { src?: string | null; alt: string }) {
+/**
+ * 海报图。
+ *
+ * 【为什么带 priority】
+ * 海报一律走 /api/img 代理，每张都是一次独立的上游回源。浏览器的加载队列
+ * 是有并发上限的（同一 host 大约 6 条 HTTP/2 流），30 张卡片同时入场时，
+ * 谁先谁后完全按 DOM 顺序 —— 于是「折叠线内那 6 张」和「下面第 25 张」
+ * 拿到的优先级是一样的。手机弱网下这直接表现为「首屏一片灰底，要等很久才出图」。
+ * 给首屏那几张打上 high，浏览器就会把它们插到队列最前面，
+ * 剩下的继续 lazy，总流量不变，但第一眼的等待感差别很大。
+ */
+function Poster({ src, alt, priority }: { src?: string | null; alt: string; priority?: boolean }) {
 	const [bad, setBad] = useState(false);
 	if (!src || bad) return <div className="poster-fallback">{alt.slice(0, 6)}</div>;
 	// 项目在 Workers 上关闭了 Next 图片优化（images.unoptimized），且海报一律走
@@ -132,8 +143,9 @@ function Poster({ src, alt }: { src?: string | null; alt: string }) {
 			src={src}
 			alt={alt}
 			className="poster"
-			loading="lazy"
+			loading={priority ? "eager" : "lazy"}
 			decoding="async"
+			fetchPriority={priority ? "high" : undefined}
 			onError={() => setBad(true)}
 		/>
 	);
@@ -414,7 +426,7 @@ export default function HomePage() {
 		return (
 			<>
 				<div className="grid">
-					{shown.map((it) => {
+					{shown.map((it, idx) => {
 						const altCount = it.alts?.length ?? 0;
 						// 真实源数优先：alts 被截断在 8 条，照它显示会在同名片
 						// 超过 9 个源时开始说谎。缺省时退回 altCount + 1（旧数据形状）。
@@ -428,7 +440,8 @@ export default function HomePage() {
 								aria-label={`播放 ${it.title}`}
 							>
 								<div className="poster-box">
-									<Poster src={it.poster} alt={it.title} />
+									{/* 前三行（约 9 张）是首屏能看到的量，优先加载 */}
+									<Poster src={it.poster} alt={it.title} priority={idx < 9} />
 									{it.remarks ? <span className="card-badge">{it.remarks}</span> : null}
 									{srcCount > 1 ? (
 										<span className="card-badge is-alt">{srcCount} 源</span>
